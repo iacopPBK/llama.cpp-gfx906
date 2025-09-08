@@ -16,7 +16,7 @@ This fork is specifically optimized for AMD GFX906 architecture (MI50, MI60, Veg
 - **Assembly optimizations** (`gfx906-asm-*`)
 - **Auto-tuning framework** (`gemm-gfx906-autotuner.cuh`)
 
-Thanks to all the https://discord.gg/sgjdAU9eRC community for the efforts on gfx906 optimization.
+Thanks to all the https://discord.gg/sgjdAU9eRC people for the efforts on gfx906 optimization.
 
 **This fork builds upon skyne98's GFX906 optimization work, i did focus specifically on flash attention improvements for D=128 models.**
 
