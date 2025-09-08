@@ -2,7 +2,7 @@
 
 **Specialized llama.cpp fork with GFX906 flash attention optimizations for D=128 head dimension models ONLY!**
 
-This fork is specifically optimized for AMD GFX906 architecture (MI50, MI60, Vega VII) and targets models with **head dimension D=128** (such as Qwen3-30B series). The aim of this fork is to be able to run a QWEN30B session with 32K ctx on a single card without loosing too much speed. For this reason the fork won't work with smaller models (you can check the huggingface model sheet for key and value lengths).
+This fork is specifically optimized for AMD GFX906 architecture (MI50, MI60, Vega VII) and targets models with **head dimension D=128** (such as Qwen3-30B series). The aim of this fork is to be able to run a QWEN30B session with 32K ctx on a single card without losing too much speed. For this reason the fork won't work with smaller models (you can check the huggingface model sheet for key and value lengths).
 
 ---
 
