@@ -1,0 +1,42 @@
+# GFX906 Memory Optimization Test Build Configuration
+
+if(GGML_HIP AND GGML_HIP_GFX906_OPTIMIZED)
+    # Add GFX906 memory test executable
+    add_executable(test-gfx906-memory test-gfx906-memory.cu)
+    
+    target_compile_definitions(test-gfx906-memory PRIVATE
+        GGML_HIP_GFX906_OPTIMIZED
+        GGML_USE_HIP
+    )
+    
+    target_include_directories(test-gfx906-memory PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${HIP_INCLUDE_DIRS}
+    )
+    
+    target_link_libraries(test-gfx906-memory PRIVATE
+        hip::device
+        hip::host
+    )
+    
+    set_target_properties(test-gfx906-memory PROPERTIES
+        HIP_ARCHITECTURES "gfx906"
+        POSITION_INDEPENDENT_CODE ON
+    )
+    
+    # Add test to CTest
+    add_test(NAME test-gfx906-memory
+        COMMAND test-gfx906-memory
+    )
+    
+    # Set test properties
+    set_tests_properties(test-gfx906-memory PROPERTIES
+        LABELS "gfx906;memory;optimization"
+        TIMEOUT 60
+    )
+    
+    # Install test executable
+    install(TARGETS test-gfx906-memory
+        RUNTIME DESTINATION bin/tests
+    )
+endif()

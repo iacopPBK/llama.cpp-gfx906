@@ -35,6 +35,16 @@
 #include "vendors/cuda.h"
 #endif // defined(GGML_USE_HIP)
 
+#ifdef GGML_HIP_GFX906_OPTIMIZED
+#include "gfx906-config.cuh"
+#include "gfx906-wave-primitives.cuh"
+#include "gfx906-wave-primitives-swizzle.cuh"
+#include "gfx906-memory-isa.cuh"
+#include "gfx906-memory-patterns.cuh"
+#include "gfx906-memcpy.cuh"
+// Note: gfx906-init.cu is compiled separately, not included as header
+#endif
+
 #define STRINGIZE_IMPL(...) #__VA_ARGS__
 #define STRINGIZE(...) STRINGIZE_IMPL(__VA_ARGS__)
 
@@ -386,11 +396,32 @@ static __device__ __forceinline__ int warp_reduce_sum(int x) {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_sum(float x) {
-#pragma unroll
-    for (int offset = width/2; offset > 0; offset >>= 1) {
-        x += __shfl_xor_sync(0xffffffff, x, offset, width);
+    if constexpr (width == 64) {
+        // AMD GFX906 proper 64-thread wavefront reduction
+        // Get the lane ID within the current wavefront (0-63)
+        const int lane = __lane_id();  // HIP intrinsic for lane within wavefront
+        
+        // Step 1: Reduce within each 32-thread SIMD unit
+        #pragma unroll  
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            x += __shfl_xor_sync(0xffffffff, x, offset, 32);
+        }
+        
+        // Step 2: Exchange results between SIMD units  
+        // Use partner lane from the other SIMD unit
+        int partner_lane = lane ^ 32;  // XOR bit 5 to switch SIMD units
+        float other_simd = __shfl_sync(0xffffffff, x, partner_lane, 64);
+        
+        // Step 3: Each SIMD unit now has both results, combine them
+        return x + other_simd;
+    } else {
+        // Standard reduction for 32 threads or less
+        #pragma unroll
+        for (int offset = width/2; offset > 0; offset >>= 1) {
+            x += __shfl_xor_sync(0xffffffff, x, offset, width);
+        }
+        return x;
     }
-    return x;
 }
 
 template<int width = WARP_SIZE>
@@ -446,11 +477,37 @@ static __device__ __forceinline__ int warp_reduce_any(int x) {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_max(float x) {
-#pragma unroll
-    for (int offset = width/2; offset > 0; offset >>= 1) {
-        x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, offset, width));
+    if constexpr (width == 64) {
+#ifdef GGML_HIP_GFX906_OPTIMIZED
+        // Use DS_SWIZZLE optimized reduction for GFX906
+        return wave_reduce_max(x);
+#else
+        // AMD GFX906 proper 64-thread wavefront reduction fallback
+        // Get the lane ID within the current wavefront (0-63)
+        const int lane = __lane_id();  // HIP intrinsic for lane within wavefront
+        
+        // Step 1: Reduce within each 32-thread SIMD unit  
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, offset, 32));
+        }
+        
+        // Step 2: Exchange results between SIMD units
+        // Use partner lane from the other SIMD unit  
+        int partner_lane = lane ^ 32;  // XOR bit 5 to switch SIMD units
+        float other_simd = __shfl_sync(0xffffffff, x, partner_lane, 64);
+        
+        // Step 3: Each SIMD unit now has both results, combine them
+        return fmaxf(x, other_simd);
+#endif
+    } else {
+        // Standard reduction for 32 threads or less
+        #pragma unroll
+        for (int offset = width/2; offset > 0; offset >>= 1) {
+            x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, offset, width));
+        }
+        return x;
     }
-    return x;
 }
 
 static __device__ __forceinline__ half ggml_cuda_hmax(const half a, const half b) {
@@ -494,6 +551,30 @@ static __device__ __forceinline__ half2 warp_reduce_max(half2 x) {
    GGML_UNUSED(x);
    NO_DEVICE_CODE;
 #endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_PASCAL || defined(GGML_USE_HIP)
+}
+
+template<int width = WARP_SIZE>
+static __device__ __forceinline__ half warp_reduce_max(half x) {
+#ifdef FP16_AVAILABLE
+#if defined(GGML_USE_HIP)
+    // HIP/ROCm 64-thread wavefront
+    if constexpr (width == 64) {
+        for (int offset = 32; offset > 0; offset >>= 1) {
+            x = ggml_cuda_hmax(x, __shfl_xor(x, offset, 64));  // No mask, HIP handles it
+        }
+        return x;
+    }
+#endif
+    // CUDA 32-thread warp fallback
+#pragma unroll
+    for (int offset = width/2; offset > 0; offset >>= 1) {
+        x = ggml_cuda_hmax(x, __shfl_xor_sync(0xffffffff, x, offset, width));
+    }
+    return x;
+#else
+    GGML_UNUSED(x);
+    NO_DEVICE_CODE;
+#endif // FP16_AVAILABLE
 }
 
 #if (defined(CUDART_VERSION) && CUDART_VERSION < CUDART_HMASK) || defined(GGML_USE_HIP) || \
@@ -561,40 +642,6 @@ static __device__ __forceinline__ float ggml_cuda_e8m0_to_fp32(uint8_t x) {
     memcpy(&result, &bits, sizeof(float));
     return result;
 #endif // CUDART_VERSION >= 12050
-}
-
-// See https://gmplib.org/~tege/divcnst-pldi94.pdf figure 4.1.
-// Precompute mp (m' in the paper) and L such that division
-// can be computed using a multiply (high 32b of 64b result)
-// and a shift:
-//
-// n/d = (mulhi(n, mp) + n) >> L;
-static const uint3 init_fastdiv_values(uint32_t d) {
-    GGML_ASSERT(d != 0);
-
-    // compute L = ceil(log2(d));
-    uint32_t L = 0;
-    while (L < 32 && (uint32_t{ 1 } << L) < d) {
-        L++;
-    }
-
-    uint32_t mp = (uint32_t) ((uint64_t{ 1 } << 32) * ((uint64_t{ 1 } << L) - d) / d + 1);
-    // pack divisor as well to reduce error surface
-    return make_uint3(mp, L, d);
-}
-
-static __device__ __forceinline__ uint32_t fastdiv(uint32_t n, const uint3 fastdiv_values) {
-    // expects fastdiv_values to contain <mp, L, divisor> in <x, y, z>
-    // fastdiv_values.z is unused and optimized away by the compiler.
-    // Compute high 32 bits of n * mp
-    const uint32_t hi = __umulhi(n, fastdiv_values.x);
-    // add n, apply bit shift
-    return (hi + n) >> fastdiv_values.y;
-}
-
-static __device__ __forceinline__ uint32_t fastmodulo(uint32_t n, const uint3 fastdiv_values) {
-    // expects  fastdiv_values to contain <mp, L, divisor> in <x, y, z> (see init_fastdiv_values)
-    return n - fastdiv(n, fastdiv_values) * fastdiv_values.z;
 }
 
 typedef void (*dequantize_kernel_t)(const void * vx, const int64_t ib, const int iqs, float2 & v);

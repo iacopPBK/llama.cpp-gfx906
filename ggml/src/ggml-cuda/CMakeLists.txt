@@ -58,6 +58,23 @@ if (CUDAToolkit_FOUND)
         list(APPEND GGML_SOURCES_CUDA ${SRCS})
     endif()
 
+    # Add GFX906 assembly kernels if optimization is enabled
+    if(GGML_HIP_GFX906_OPTIMIZED AND CMAKE_HIP_COMPILER_ID MATCHES "Clang")
+        # Add assembly source files
+        file(GLOB GFX906_ASM_SOURCES "gfx906-asm-kernels.s")
+        if(GFX906_ASM_SOURCES)
+            list(APPEND GGML_SOURCES_CUDA ${GFX906_ASM_SOURCES})
+            message(STATUS "Added GFX906 assembly kernels: ${GFX906_ASM_SOURCES}")
+        endif()
+        
+        # Add precompiled assembly objects
+        file(GLOB GFX906_ASM_OBJECTS "kernels/*.hsaco")
+        if(GFX906_ASM_OBJECTS)
+            # These are linked as binary objects at runtime
+            message(STATUS "Found GFX906 assembly objects: ${GFX906_ASM_OBJECTS}")
+        endif()
+    endif()
+
     ggml_add_backend_library(ggml-cuda
                              ${GGML_HEADERS_CUDA}
                              ${GGML_SOURCES_CUDA}

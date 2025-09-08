@@ -64,6 +64,11 @@ list(APPEND GGML_SOURCES_ROCM ${SRCS})
 file(GLOB   SRCS "../ggml-cuda/template-instances/mmq*.cu")
 list(APPEND GGML_SOURCES_ROCM ${SRCS})
 
+# Add GFX906-specific optimizations if building for gfx906
+if (CMAKE_HIP_ARCHITECTURES MATCHES "gfx906" OR AMDGPU_TARGETS MATCHES "gfx906")
+    add_compile_definitions(GGML_HIP_GFX906_OPTIMIZED)
+endif()
+
 if (GGML_CUDA_FA_ALL_QUANTS)
     file(GLOB   SRCS "../ggml-cuda/template-instances/fattn-vec*.cu")
     list(APPEND GGML_SOURCES_ROCM ${SRCS})
