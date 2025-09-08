@@ -8,7 +8,7 @@ This fork is specifically optimized for AMD GFX906 architecture (MI50, MI60, Veg
 
 ## Acknowledgments
 
-**Special thanks to [skyne98](https://github.com/skyne98/ggml-gfx906)** for the foundational work, and of course to the whole llama.cpp open source community:
+**Special thanks to [skyne98](https://github.com/skyne98/ggml-gfx906)** for the foundational work, and of course to the whole [ggml-org]([https://github.com/ggml-org/llama.cpp])** open source community:
 
 - **All GFX906 primitive operations** (`gfx906-wave-primitives*.cuh`)
 - **GEMM kernel implementations** (`gemm-gfx906*.cu/cuh`) 
