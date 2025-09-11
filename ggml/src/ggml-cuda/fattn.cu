@@ -4,6 +4,7 @@
 #include "fattn-tile-f16-gfx906.cuh"
 #include "fattn-tile-f32.cuh"
 #include "fattn-vec-f16.cuh"
+#include "fattn-vec-f16-gfx906-d128.cuh"  // GFX906-optimized D=128 kernel
 #include "fattn-vec-f32.cuh"
 #include "fattn-wmma-f16.cuh"
 #include "fattn.cuh"
@@ -124,10 +125,30 @@ static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, gg
         return;                                                             \
     }                                                                       \
 
+// GFX906-specific macro for D=128 kernels
+#define FATTN_VEC_F16_GFX906_D128_CASE(type_K, type_V)                          \
+    if (Q->ne[0] == 128 && K->type == (type_K) && V->type == (type_V)) {        \
+        ggml_cuda_flash_attn_ext_vec_f16_gfx906_d128_case<type_K, type_V>(ctx, dst); \
+        return;                                                                 \
+    }                                                                           \
+
 static void ggml_cuda_flash_attn_ext_vec_f16(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_tensor * Q = dst->src[0];
     ggml_tensor * K = dst->src[1];
     ggml_tensor * V = dst->src[2];
+    
+    // Check if this is GFX906 and use optimized kernel
+    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+    const bool is_gfx906 = (cc == GGML_CUDA_CC_VEGA20);
+    
+    // GFX906-optimized D=128 kernels (Phase A: Optimized dequantization with working wave reductions)
+    if (is_gfx906 && Q->ne[0] == 128) {
+        FATTN_VEC_F16_GFX906_D128_CASE(GGML_TYPE_F16,  GGML_TYPE_F16)
+        FATTN_VEC_F16_GFX906_D128_CASE(GGML_TYPE_Q8_0, GGML_TYPE_Q8_0)
+        FATTN_VEC_F16_GFX906_D128_CASE(GGML_TYPE_Q4_0, GGML_TYPE_Q4_0)
+        FATTN_VEC_F16_GFX906_D128_CASE(GGML_TYPE_Q5_0, GGML_TYPE_Q5_0)
+        // Fall through to standard kernels for other combinations
+    }
 
 #ifdef GGML_CUDA_FA_ALL_QUANTS
     FATTN_VEC_F16_CASE( 64, GGML_TYPE_F16, GGML_TYPE_Q4_0)

@@ -21,9 +21,9 @@ BENCH_PARAMS=(
     -ngl 99                    # Offload all layers to GPU
     -b 1024                    # Batch size (matches server)
     -t $(nproc)                # Use all CPU threads
-    -fa 0                      # Enable flash attention (GFX906 optimized)
-    #-ctk q8_0                  # q8_0 quantized K cache (matches server)
-    #-ctv q8_0                  # q8_0 quantized V cache (matches server)
+    -fa 1                     # Enable flash attention (GFX906 optimized
+    -ctk q8_0                  # q8_0 quantized K cache (matches server)
+    -ctv q8_0                  # q8_0 quantized V cache (matches server)
     --main-gpu 0               # Force MI50 as main GPU
     --progress                 # Show progress indicators
 )

@@ -121,7 +121,7 @@ __device__ __forceinline__ __half2 wave_reduce_sum(__half2 value) {
     return value;
 }
 
-// Wave reduce max using DS_SWIZZLE for GFX906
+// Wave reduce max using DS_SWIZZLE for GFX906 - 32-bit types
 template <typename T> __device__ __forceinline__ T wave_reduce_max(T value) {
     static_assert(sizeof(T) == 4, "DS_SWIZZLE only supports 32-bit types");
     T shuffled;
@@ -165,6 +165,25 @@ template <typename T> __device__ __forceinline__ T wave_reduce_min(T value) {
     shuffled = __shfl_xor(value, 32, WAVE_SIZE);
     value = (value < shuffled) ? value : shuffled;
     return value;
+}
+
+// Specialization for __half - convert to float, reduce, convert back
+template<> __device__ __forceinline__ __half wave_reduce_max(__half value) {
+    float float_val = __half2float(value);
+    float float_result = wave_reduce_max(float_val);
+    return __float2half(float_result);
+}
+
+template<> __device__ __forceinline__ __half wave_reduce_sum(__half value) {
+    float float_val = __half2float(value);
+    float float_result = wave_reduce_sum(float_val);
+    return __float2half(float_result);
+}
+
+template<> __device__ __forceinline__ __half wave_reduce_min(__half value) {
+    float float_val = __half2float(value);
+    float float_result = wave_reduce_min(float_val);
+    return __float2half(float_result);
 }
 
 // Wave reduce with custom operation
