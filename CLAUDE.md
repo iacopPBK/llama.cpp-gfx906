@@ -170,25 +170,33 @@ llama-bench -m model.gguf -p 2048 -n 256 -fa 1  # GFX906
 
 ## Research Log & Progress
 
-### 2025-09-12: BREAKTHROUGH - Flash Attention Kernels Profiled Successfully!
-- ✅ **196,800 Flash Attention kernel dispatches captured** with Qwen3-Coder-30B
-- ✅ **Real performance data from GFX906 hardware** - not theoretical
-- ✅ **Two kernel types identified:** `flash_attn_tile_ext_f16_warp` + `flash_attn_combine_results`
-- 🎯 **CRITICAL FINDING:** Current FA kernels use 512 threads/workgroup = 8 waves × 64 threads ✅
-- 📊 **Performance:** Main kernel ~391-549μs, Combine kernel ~11-43μs per dispatch
+### 2025-09-12: BREAKTHROUGH - Both Tile AND Vector Kernels Profiled!
+- ✅ **196,800 Tile kernel dispatches** (prompt processing): `flash_attn_tile_ext_f16_warp`
+- ✅ **14,400 Vector kernel dispatches** (inference): `flash_attn_vec_ext_f16_gfx906_d128`
+- 🎯 **CRITICAL FINDING:** Both kernel types are actively used in different phases!
+- 📊 **Tile Performance:** 391-549μs per dispatch, 63KB LDS (98% util), 128 VGPRs
+- 📊 **Vector Performance:** 510-574μs per dispatch, 1KB LDS (1.6% util), 64 VGPRs
 
-### Real Hardware Configuration Discovered:
-- **Grid Size:** 65,536 total threads for main kernel
-- **Workgroup:** 512 threads = **8 native GFX906 64-thread waves**
-- **LDS Usage:** 63,488 bytes (98% of 64KB limit) - near optimal
-- **VGPR Usage:** 128 VGPRs per thread (high register pressure)
-- **Wave Size:** 64 threads (native GFX906, not 32-thread emulation)
+### Hardware Configuration Comparison (Tile vs Vector):
 
-### Performance Analysis from Real Data:
-- **Main Kernel Time:** 391-549 microseconds per dispatch
-- **Combine Kernel Time:** 11-43 microseconds per dispatch
-- **Memory Bandwidth:** ~98% LDS utilization indicates memory-bound
-- **Register Pressure:** 128 VGPRs/thread may limit occupancy
+**Tile Kernels** (`flash_attn_tile_ext_f16_warp`) - **Prompt Processing:**
+- **Grid Size:** 65,536 threads
+- **Workgroup:** 512 threads = **8 waves × 64 threads** 
+- **LDS Usage:** 63,488 bytes (98% utilization) - memory-bound
+- **VGPR Usage:** 128 per thread (high register pressure)
+- **Performance:** 391-549μs per dispatch (well optimized)
+
+**Vector Kernels** (`flash_attn_vec_ext_f16_gfx906_d128`) - **Inference:**
+- **Grid Size:** 8,192 threads  
+- **Workgroup:** 128 threads = **2 waves × 64 threads**
+- **LDS Usage:** 1,024 bytes (1.6% utilization) - **severely underutilized**
+- **VGPR Usage:** 64 per thread (better occupancy potential)
+- **Performance:** 510-574μs per dispatch (**slower than tile kernels!**)
+
+### Critical Performance Issues Identified:
+1. **Vector kernels are SLOWER per dispatch than tile kernels** (574μs vs 549μs)
+2. **Vector kernels waste 98% of available LDS** (1KB vs 64KB available)
+3. **Vector kernel performance is the inference bottleneck** (single token generation)
 
 ### Phase 1 (Previously): Basic Copy Complete
 - ✅ Created clean copy of standard kernel
@@ -211,11 +219,11 @@ llama-bench -m model.gguf -p 2048 -n 256 -fa 1  # GFX906
 
 ## Next Steps & Research Priorities
 
-### Immediate (Phase 2)
-1. **Test Phase 1 compilation** - verify minimal port works
-2. **Implement wave reduction replacement** - core optimization
-3. **Validate correctness** - ensure outputs match standard kernel
-4. **Measure performance delta** - quantify improvement from reductions alone
+### Immediate (Phase 2) - Vector Kernel Optimization Priority
+1. **Vector kernel LDS utilization** - increase from 1.6% to meaningful usage
+2. **Vector kernel register blocking** - apply tile kernel's 8x reduction techniques  
+3. **Vector kernel wave reductions** - optimize for 2-wave configuration
+4. **Performance target** - match or exceed tile kernel's 391-549μs performance
 
 ### Short-term Research
 1. **Thread organization study** - 64 vs 128 vs 256 threads
