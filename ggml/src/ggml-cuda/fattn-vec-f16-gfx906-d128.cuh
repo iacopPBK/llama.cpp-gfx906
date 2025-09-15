@@ -36,15 +36,18 @@ __device__ __forceinline__ half dequantize_1_v_gfx906_q8_0(const char * __restri
 }
 
 // GFX906-specific padding constants for bank conflict elimination
-// Based on tile kernel proven patterns, but scaled conservatively
-constexpr int GFX906_KQ_PADDING = 16;        // Conservative KQ padding (vs tile's 48)
-constexpr int GFX906_MASK_PADDING = 16;      // Conservative mask padding  
-constexpr int GFX906_V_CACHE_PADDING = 16;   // Conservative V cache padding (vs tile's 48)
-constexpr int GFX906_REDUCTION_PADDING = 16; // Wave-sized reduction padding
+// Updated to match tile kernel's proven optimized values for maximum performance
+constexpr int GFX906_KQ_PADDING = 48;        // Match tile kernel's proven KQ padding
+constexpr int GFX906_MASK_PADDING = 48;      // Match tile kernel's proven mask padding
+constexpr int GFX906_V_CACHE_PADDING = 48;   // Match tile kernel's proven V cache padding
+constexpr int GFX906_REDUCTION_PADDING = 64; // Native GFX906 wave size for reduction arrays
 
 // Phase 1A: Conservative V cache sizing (8 tokens vs unlimited current)
 constexpr int V_CACHE_TOKENS = 8;            // Cache 8 sequence positions
 constexpr int WAVE_SIZE_GFX906 = 64;         // Native GFX906 wave size
+
+// Phase 1B: Enhanced V dequantization caching constants
+constexpr int V_CACHE_CHUNK_SIZE = 16;       // Process 16 V vectors per chunk
 
 #endif // GGML_HIP_GFX906_PHASE1A
 
@@ -146,21 +149,22 @@ __global__ void flash_attn_vec_ext_f16_gfx906_d128(
     // Phase 1A: ENHANCED SHARED MEMORY LAYOUT with strategic padding
 #if GGML_HIP_GFX906_PHASE1A
     // Bank conflict elimination through strategic padding
-    __shared__ half KQ[ncols*(D + GFX906_KQ_PADDING)];                      // 288 bytes (vs 256)
-    __shared__ half kqmax_shared[ncols][WAVE_SIZE_GFX906 + GFX906_REDUCTION_PADDING]; // 160 bytes (vs 64) 
-    __shared__ half kqsum_shared[ncols][WAVE_SIZE_GFX906 + GFX906_REDUCTION_PADDING]; // 160 bytes (vs 64)
-    __shared__ half maskh_shared[ncols*(D + GFX906_MASK_PADDING)];          // 288 bytes (vs 256)
+    __shared__ half KQ[ncols*(D + GFX906_KQ_PADDING)];                      // 352 bytes (vs 256) - 48-byte padding
+    __shared__ half kqmax_shared[ncols][WAVE_SIZE_GFX906 + GFX906_REDUCTION_PADDING]; // 256 bytes (vs 64) - 64-byte padding
+    __shared__ half kqsum_shared[ncols][WAVE_SIZE_GFX906 + GFX906_REDUCTION_PADDING]; // 256 bytes (vs 64) - 64-byte padding
+    __shared__ half maskh_shared[ncols*(D + GFX906_MASK_PADDING)];          // 352 bytes (vs 256) - 48-byte padding
+
+    // Phase 1B: V dequantization caching - cooperative Q8_0 block loading + dequantized cache
+    __shared__ block_q8_0 V_q8_0_blocks[V_CACHE_CHUNK_SIZE][4]; // 16×4×34 = 2,176 bytes (4 blocks for D=128)
+    __shared__ half V_dequant_cache[V_CACHE_CHUNK_SIZE][D + GFX906_V_CACHE_PADDING];  // 16×176×2 = 5,632 bytes
     
-    // Phase 1A: V cache disabled due to correctness issues - will be fixed in Phase 1B
-    // __shared__ half V_cache[V_CACHE_TOKENS][D + GFX906_V_CACHE_PADDING]; // DISABLED
-    // __shared__ int V_cache_valid[V_CACHE_TOKENS];                         // DISABLED
-    
-    // Phase 1B LDS usage: 288+160+160+288 = 896 bytes (1.4% utilization - similar to baseline)
-    // Phase 1B optimization: 4× vectorized V dequantization throughput
+    // Phase 1B LDS usage: 352+256+256+352+2176+5632 = 9,024 bytes (14% utilization)
+    // Phase 1B optimizations: Bank conflicts + V caching + cooperative loading + correct block mapping
     
     // Padded array access macros for bank conflict avoidance
     #define KQ_ACCESS(j, i) KQ[(j) * (D + GFX906_KQ_PADDING) + (i)]
     #define MASK_ACCESS(j, i) maskh_shared[(j) * (D + GFX906_MASK_PADDING) + (i)]
+    #define V_CACHE_ACCESS(k_local, head_dim) V_dequant_cache[k_local][(head_dim)]
     
 #else
     // Original layout (fallback for testing)
@@ -396,56 +400,67 @@ __global__ void flash_attn_vec_ext_f16_gfx906_d128(
 
         __syncthreads();
 
-        // Phase 1B: SEQUENCE-WISE VECTORIZED V PROCESSING - Mathematically Correct 4× speedup
+        // Phase 1B: COOPERATIVE V DEQUANTIZATION CACHING - Eliminates redundant block loads + mathematical correctness
 #if GGML_HIP_GFX906_PHASE1A
-        // Phase 1B: Correct sequence-wise vectorized dequantization for Q8_0
         if constexpr (type_V == GGML_TYPE_Q8_0) {
-            // Process V sequences in groups of 4 - each thread keeps same head dimension
-            constexpr int VECTOR_SIZE = 4;
-            
-            for (int k0 = 0; k0 < D; k0 += VECTOR_SIZE) {
-                if (FATTN_KQ_STRIDE % D != 0 && k_VKQ_0 + k0 >= ne11) {
+            // Process V in chunks to fit shared memory (16 vectors per chunk)
+            for (int k_chunk = 0; k_chunk < D; k_chunk += V_CACHE_CHUNK_SIZE) {
+                const int chunk_size = min(V_CACHE_CHUNK_SIZE, D - k_chunk);
+
+                if (FATTN_KQ_STRIDE % D != 0 && k_VKQ_0 + k_chunk >= ne11) {
                     break;
                 }
-                
-                const int remaining = min(VECTOR_SIZE, D - k0);
-                
-                if (remaining >= 4) {
-                    // Vectorized sequence processing: thread tid processes 4 consecutive sequences
-                    // V[k0, tid], V[k0+1, tid], V[k0+2, tid], V[k0+3, tid]
-                    half4 V_seq4 = dequantize_4v_sequence_q8_0<D>(V, k0, tid, nb21);
-                    
-                    // Process in pairs to match existing accumulation pattern
-                    half2 V_k01 = {V_seq4.x, V_seq4.y};  // sequences k0, k0+1
-                    half2 V_k23 = {V_seq4.z, V_seq4.w};  // sequences k0+2, k0+3
-                    
-                    // Flash Attention accumulation - mathematically identical to original
-#pragma unroll
-                    for (int j = 0; j < ncols; ++j) {
-                        VKQ[j] += V_k01 * KQ2[j*(D/2) + k0/2];        // k0, k0+1
-                        VKQ[j] += V_k23 * KQ2[j*(D/2) + (k0+2)/2];    // k0+2, k0+3
-                    }
-                } else if (remaining >= 2) {
-                    // 2-element processing for remaining sequences
-                    half2 V_k;
-                    reinterpret_cast<half&>(V_k.x) = dequantize_1_v_gfx906_q8_0<D>(V + (k0 + 0)*nb21, tid);
-                    reinterpret_cast<half&>(V_k.y) = dequantize_1_v_gfx906_q8_0<D>(V + (k0 + 1)*nb21, tid);
-                    
-#pragma unroll
-                    for (int j = 0; j < ncols; ++j) {
-                        VKQ[j] += V_k * KQ2[j*(D/2) + k0/2];
-                    }
-                } else {
-                    // Single element fallback
-                    half2 V_k;
-                    reinterpret_cast<half&>(V_k.x) = dequantize_1_v_gfx906_q8_0<D>(V + k0*nb21, tid);
-                    V_k.y = __float2half(0.0f);
-                    
-#pragma unroll
-                    for (int j = 0; j < ncols; ++j) {
-                        VKQ[j] += V_k * KQ2[j*(D/2) + k0/2];
+
+                // Phase 1: Cooperative Q8_0 block loading (eliminates redundant loads)
+                // Load all blocks needed for this chunk cooperatively - up to 32× fewer loads
+                const int blocks_per_sequence = 4;  // D=128, QK8_0=32 → 4 blocks
+                const int total_blocks_needed = chunk_size * blocks_per_sequence;
+
+                // Each thread loads a different block to maximize parallelism
+                for (int load_idx = threadIdx.x; load_idx < total_blocks_needed; load_idx += blockDim.x) {
+                    const int load_k_local = load_idx / blocks_per_sequence;  // Which sequence
+                    const int load_block_idx = load_idx % blocks_per_sequence;  // Which block within sequence
+
+                    if (load_k_local < chunk_size) {
+                        const char* V_seq = V + (k_chunk + load_k_local) * nb21;
+                        const block_q8_0* V_q8_0_seq = (const block_q8_0*)V_seq;
+                        V_q8_0_blocks[load_k_local][load_block_idx] = V_q8_0_seq[load_block_idx];
                     }
                 }
+                __syncthreads();
+
+                // Phase 2: Cooperative dequantization using correctly loaded blocks
+                for (int k_local = 0; k_local < chunk_size; k_local++) {
+                    if (k_chunk + k_local < D) {
+                        // Each thread uses the block it actually needs (not warp-based)
+                        const int block_idx = tid / 32;   // Which Q8_0 block for this thread
+                        const int local_idx = tid % 32;   // Index within that block
+
+                        const block_q8_0& block = V_q8_0_blocks[k_local][block_idx];
+                        const float scale = __half2float(block.d);
+                        const float dequant_val = scale * (float)block.qs[local_idx];
+                        V_CACHE_ACCESS(k_local, tid) = __float2half(dequant_val);
+                    } else {
+                        V_CACHE_ACCESS(k_local, tid) = __float2half(0.0f);
+                    }
+                }
+                __syncthreads();
+
+                // Phase 3: Flash Attention accumulation from cache (mathematically identical)
+                for (int k_local = 0; k_local < chunk_size; k_local += 2) {
+                    if (k_chunk + k_local >= D) break;
+
+                    half2 V_k;
+                    V_k.x = V_CACHE_ACCESS(k_local, tid);
+                    V_k.y = (k_local + 1 < chunk_size && k_chunk + k_local + 1 < D) ?
+                            V_CACHE_ACCESS(k_local + 1, tid) : __float2half(0.0f);
+
+#pragma unroll
+                    for (int j = 0; j < ncols; ++j) {
+                        VKQ[j] += V_k * KQ2[j*(D/2) + (k_chunk + k_local)/2];
+                    }
+                }
+                __syncthreads();
             }
         } else {
             // Non-Q8_0 types: use original processing
