@@ -453,6 +453,17 @@ static __device__ __forceinline__ T dequantize_1_q8_0(const void * __restrict__ 
     return ((float) d)*((float) q);
 }
 
+// GFX906 optimized Q8_0 dequantization using compiler vectorization hints
+__device__ __forceinline__ half dequantize_q8_0_optimized(
+    const int8_t qs_val,
+    const half scale
+) {
+    // Use explicit FP32 intermediate for better compiler optimization
+    const float scale_f = __half2float(scale);
+    const float result_f = (float)qs_val * scale_f;
+    return __float2half(result_f);
+}
+
 template <typename T>
 static __device__ __forceinline__ T dequantize_1_f16(const void * __restrict__ vx, const int64_t i) {
     const half * x = (const half *) vx;

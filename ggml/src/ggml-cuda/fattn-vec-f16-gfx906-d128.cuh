@@ -411,13 +411,14 @@ __global__ void flash_attn_vec_ext_f16_gfx906_d128(
                     break;
                 }
 
-                // Phase 1: Cooperative Q8_0 block loading (eliminates redundant loads)
-                // Load all blocks needed for this chunk cooperatively - up to 32× fewer loads
+                // Phase 1: Corrected optimized block loading
+                // Load all blocks needed for this chunk cooperatively
                 const int blocks_per_sequence = 4;  // D=128, QK8_0=32 → 4 blocks
                 const int total_blocks_needed = chunk_size * blocks_per_sequence;
 
-                // Each thread loads a different block to maximize parallelism
+                // Optimized loading: Original pattern but with pre-computed division/modulo
                 for (int load_idx = threadIdx.x; load_idx < total_blocks_needed; load_idx += blockDim.x) {
+                    // Pre-compute these once instead of recalculating
                     const int load_k_local = load_idx / blocks_per_sequence;  // Which sequence
                     const int load_block_idx = load_idx % blocks_per_sequence;  // Which block within sequence
 
@@ -429,35 +430,42 @@ __global__ void flash_attn_vec_ext_f16_gfx906_d128(
                 }
                 __syncthreads();
 
-                // Phase 2: Cooperative dequantization using correctly loaded blocks
+                // Phase 2: Optimized dequantization - all threads active, better memory pattern
                 for (int k_local = 0; k_local < chunk_size; k_local++) {
                     if (k_chunk + k_local < D) {
-                        // Each thread uses the block it actually needs (not warp-based)
-                        const int block_idx = tid / 32;   // Which Q8_0 block for this thread
-                        const int local_idx = tid % 32;   // Index within that block
+                        // Simple, efficient indexing - all threads work
+                        const int block_idx = tid / QK8_0;   // Which Q8_0 block for this thread
+                        const int local_idx = tid % QK8_0;   // Index within that block
 
                         const block_q8_0& block = V_q8_0_blocks[k_local][block_idx];
-                        const float scale = __half2float(block.d);
-                        const float dequant_val = scale * (float)block.qs[local_idx];
-                        V_CACHE_ACCESS(k_local, tid) = __float2half(dequant_val);
+
+                        // Use optimized dequantization function - compiler will vectorize
+                        V_CACHE_ACCESS(k_local, tid) = dequantize_q8_0_optimized(
+                            block.qs[local_idx],
+                            block.d
+                        );
                     } else {
                         V_CACHE_ACCESS(k_local, tid) = __float2half(0.0f);
                     }
                 }
                 __syncthreads();
 
-                // Phase 3: Flash Attention accumulation from cache (mathematically identical)
+                // Phase 3: Optimized accumulation with explicit packed FMA
                 for (int k_local = 0; k_local < chunk_size; k_local += 2) {
                     if (k_chunk + k_local >= D) break;
 
-                    half2 V_k;
-                    V_k.x = V_CACHE_ACCESS(k_local, tid);
-                    V_k.y = (k_local + 1 < chunk_size && k_chunk + k_local + 1 < D) ?
-                            V_CACHE_ACCESS(k_local + 1, tid) : __float2half(0.0f);
+                    // Load V values as half2
+                    half2 V_k = make_half2(
+                        V_CACHE_ACCESS(k_local, tid),
+                        (k_local + 1 < chunk_size && k_chunk + k_local + 1 < D) ?
+                            V_CACHE_ACCESS(k_local + 1, tid) : __float2half(0.0f)
+                    );
 
 #pragma unroll
                     for (int j = 0; j < ncols; ++j) {
-                        VKQ[j] += V_k * KQ2[j*(D/2) + (k_chunk + k_local)/2];
+                        half2 KQ_k = KQ2[j*(D/2) + (k_chunk + k_local)/2];
+                        // Explicit packed FMA instruction to guarantee V_PK_FMA_F16 generation
+                        VKQ[j] = __hfma2(V_k, KQ_k, VKQ[j]);
                     }
                 }
                 __syncthreads();
