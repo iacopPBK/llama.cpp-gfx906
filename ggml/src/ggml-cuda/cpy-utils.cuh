@@ -149,7 +149,7 @@ static __device__ void quantize_f32_q8_0_block(const float * __restrict__ x, blo
 
     for (int j = 0; j < QK8_0; ++j) {
         const float x0 = x[j]*id;
-        y->qs[j] = roundf(x0);
+        y->qs[j] = __float2int_rn(x0);
     }
 }
 

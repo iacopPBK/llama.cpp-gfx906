@@ -325,7 +325,7 @@ static __device__ __forceinline__ void quantize_q8_1_to_shared(
     if (d != 0.0f) {
 #pragma unroll
         for (int l = 0; l < int(sizeof(int)); ++l) {
-            q8[l] = roundf(vals[l] / d);
+            q8[l] = __float2int_rn(vals[l] / d);
         }
     }
 

@@ -1,6 +1,10 @@
 #include "quantize.cuh"
 #include <cstdint>
 
+#ifdef GGML_HIP_GFX906_OPTIMIZED
+#include "gfx906-config.cuh"
+#endif
+
 static __global__ void quantize_q8_1(
         const float * __restrict__ x, void * __restrict__ vy,
         const int64_t ne00, const int64_t s01, const int64_t s02, const int64_t s03,
@@ -35,7 +39,7 @@ static __global__ void quantize_q8_1(
     sum  = warp_reduce_sum(sum);
 
     const float  d = amax / 127;
-    const int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
+    const int8_t q = amax == 0.0f ? 0 : __float2int_rn(xi / d);
 
     y[ib].qs[iqs] = q;
 
@@ -87,6 +91,7 @@ static __global__ void quantize_mmq_q8_1(
     amax = fmaxf(amax, fabsf(xi.w));
 
     // Exchange max. abs. value between vals_per_scale/4 threads.
+    // Fallback: standard reduction loop
 #pragma unroll
     for (int offset = vals_per_scale/8; offset > 0; offset >>= 1) {
         amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset, WARP_SIZE));
@@ -97,6 +102,7 @@ static __global__ void quantize_mmq_q8_1(
         sum = xi.x + xi.y + xi.z + xi.w;
 
         // Calculate sums across vals_per_sum/4 threads.
+        // Standard reduction loop
 #pragma unroll
         for (int offset = vals_per_sum/8; offset > 0; offset >>= 1) {
             sum += __shfl_xor_sync(0xFFFFFFFF, sum, offset, WARP_SIZE);
@@ -104,13 +110,17 @@ static __global__ void quantize_mmq_q8_1(
     }
 
     const float d_inv = 127.0f / amax;
-    char4 q;
-    q.x = roundf(xi.x*d_inv);
-    q.y = roundf(xi.y*d_inv);
-    q.z = roundf(xi.z*d_inv);
-    q.w = roundf(xi.w*d_inv);
 
-    // Write back 4 int8 values as a single 32 bit value for better memroy bandwidth:
+    // GFX906-optimized vectorized quantization using intrinsics (FASTEST)
+    char4 q;
+    // __float2int_rn is fastest on GFX906 for round-to-nearest float-to-int conversion
+    q.x = __float2int_rn(xi.x*d_inv);
+    q.y = __float2int_rn(xi.y*d_inv);
+    q.z = __float2int_rn(xi.z*d_inv);
+    q.w = __float2int_rn(xi.w*d_inv);
+
+    // Write back 4 int8 values as a single 32-bit value for better memory bandwidth:
+    // Standard vectorized store
     char4 * yqs4 = (char4 *) y[ib].qs;
     yqs4[iqs/4] = q;
 
