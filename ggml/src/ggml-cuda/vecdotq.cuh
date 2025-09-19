@@ -110,14 +110,14 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q4_0_q8_1_imp
         const int vi0 = (v[i] >> 0) & 0x0F0F0F0F;
         const int vi1 = (v[i] >> 4) & 0x0F0F0F0F;
 
-        // SIMD dot product of quantized values
-        sumi = ggml_cuda_dp4a(vi0, u[2*i+0], sumi);
-        sumi = ggml_cuda_dp4a(vi1, u[2*i+1], sumi);
+        // INLINE ASSEMBLY: Direct GFX906 DP4A instructions
+        asm("v_dot4_i32_i8 %0, %1, %2, %3" : "=v"(sumi) : "v"(vi0), "v"(u[2*i+0]), "v"(sumi));
+        asm("v_dot4_i32_i8 %0, %1, %2, %3" : "=v"(sumi) : "v"(vi1), "v"(u[2*i+1]), "v"(sumi));
     }
 
     const float2 ds8f = __half22float2(ds8);
 
-    // second part effectively subtracts 8 from each quant value
+    // Keep original bias correction for now
     return d4 * (sumi * ds8f.x - (8*vdr/QI4_0) * ds8f.y);
 }
 
@@ -128,15 +128,17 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q4_1_q8_1_imp
     const int * v, const int * u, const half2 & dm4, const half2 & ds8) {
 
     int sumi = 0;
+    int sum_q4_1 = 0;  // Track Q4_1 sum for bias correction
 
 #pragma unroll
     for (int i = 0; i < vdr; ++i) {
         const int vi0 = (v[i] >> 0) & 0x0F0F0F0F;
         const int vi1 = (v[i] >> 4) & 0x0F0F0F0F;
 
-        // SIMD dot product of quantized values
-        sumi = ggml_cuda_dp4a(vi0, u[2*i+0], sumi);
-        sumi = ggml_cuda_dp4a(vi1, u[2*i+1], sumi);
+        // Convert Q8_1 from signed (-128,+127) to unsigned (0,255) by adding 128 to each byte
+        // REVERT TO SIGNED DP4A: Remove all overhead until we find a better approach
+        sumi = (__builtin_amdgcn_sdot4(vi0, u[2*i+0], sumi, false));
+        sumi = (__builtin_amdgcn_sdot4(vi1, u[2*i+1], sumi, false));
     }
 
 #ifdef FAST_FP16_AVAILABLE
@@ -150,7 +152,7 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q4_1_q8_1_imp
     const float m4s8 = dm4f.y * ds8f.y;
 #endif // FAST_FP16_AVAILABLE
 
-    // scale second part of sum by QI8_1/(vdr * QR4_1) to compensate for multiple threads adding it
+    // REVERTED: Standard Q4_1 calculation without unsigned DP4A offset
     return sumi * d4d8 + m4s8 / (QI8_1 / (vdr * QR4_1));
 }
 
@@ -169,14 +171,14 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q5_0_q8_1_imp
         vi0    |= (vh[i] << 11) & 0x00001000; // 1 -> 12
         vi0    |= (vh[i] << 18) & 0x00100000; // 2 -> 20
         vi0    |= (vh[i] << 25) & 0x10000000; // 3 -> 28
-        sumi = ggml_cuda_dp4a(vi0, u[2*i+0], sumi); // SIMD dot product of quantized values
+        sumi = (__builtin_amdgcn_sdot4(vi0, u[2*i+0], sumi, false)); // SIMD dot product of quantized values
 
         int vi1 = (vl[i] >>  4) & 0x0F0F0F0F; // upper 4 qs bits, still need qh as 5th bits
         vi1    |= (vh[i] >> 12) & 0x00000010; // 16 ->  4
         vi1    |= (vh[i] >>  5) & 0x00001000; // 17 -> 12
         vi1    |= (vh[i] <<  2) & 0x00100000; // 18 -> 20
         vi1    |= (vh[i] <<  9) & 0x10000000; // 19 -> 28
-        sumi = ggml_cuda_dp4a(vi1, u[2*i+1], sumi); // SIMD dot product of quantized values
+        sumi = (__builtin_amdgcn_sdot4(vi1, u[2*i+1], sumi, false)); // SIMD dot product of quantized values
     }
 
     const float2 ds8f = __half22float2(ds8);
@@ -200,14 +202,14 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q5_1_q8_1_imp
         vi0    |= (vh[i] << 11) & 0x00001000; // 1 -> 12
         vi0    |= (vh[i] << 18) & 0x00100000; // 2 -> 20
         vi0    |= (vh[i] << 25) & 0x10000000; // 3 -> 28
-        sumi = ggml_cuda_dp4a(vi0, u[2*i+0], sumi); // SIMD dot product of quantized values
+        sumi = (__builtin_amdgcn_sdot4(vi0, u[2*i+0], sumi, false)); // SIMD dot product of quantized values
 
         int vi1 = (vl[i] >>  4) & 0x0F0F0F0F; // upper 4 qs bits, still need qh as 5th bits
         vi1    |= (vh[i] >> 12) & 0x00000010; // 16 ->  4
         vi1    |= (vh[i] >>  5) & 0x00001000; // 17 -> 12
         vi1    |= (vh[i] <<  2) & 0x00100000; // 18 -> 20
         vi1    |= (vh[i] <<  9) & 0x10000000; // 19 -> 28
-        sumi = ggml_cuda_dp4a(vi1, u[2*i+1], sumi); // SIMD dot product of quantized values
+        sumi = (__builtin_amdgcn_sdot4(vi1, u[2*i+1], sumi, false)); // SIMD dot product of quantized values
     }
 
 #ifdef FAST_FP16_AVAILABLE
@@ -236,7 +238,7 @@ template <typename T, int vdr> static __device__ __forceinline__ T vec_dot_q8_0_
 #pragma unroll
     for (int i = 0; i < vdr; ++i) {
         // SIMD dot product of quantized values
-        sumi = ggml_cuda_dp4a(v[i], u[i], sumi);
+        sumi = (__builtin_amdgcn_sdot4(v[i], u[i], sumi, false));
     }
 
     return d8_0*d8_1 * ((T) sumi);
@@ -250,7 +252,7 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q8_1_q8_1_imp
 #pragma unroll
     for (int i = 0; i < vdr; ++i) {
         // SIMD dot product of quantized values
-        sumi = ggml_cuda_dp4a(v[i], u[i], sumi);
+        sumi = (__builtin_amdgcn_sdot4(v[i], u[i], sumi, false));
     }
 
 #ifdef FAST_FP16_AVAILABLE
@@ -280,7 +282,7 @@ template <int vdr> static __device__ __forceinline__ float vec_dot_q8_0_16_q8_1_
 #pragma unroll
         for (int i = i0; i < i0 + QI8_0/2; ++i) {
             // SIMD dot product of quantized values
-            sumi = ggml_cuda_dp4a(v[i], u[i], sumi);
+            sumi = (__builtin_amdgcn_sdot4(v[i], u[i], sumi, false));
         }
 
         sumf += d8_0[i0/(QI8_0/2)]*sumi;
@@ -305,8 +307,8 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
         const int aux_q4 = get_int_b1(bq4->qs, iqs + l);
         const int2 v = get_int_from_table_16(aux_q4, kvalues_mxfp4);
 
-        sumi = ggml_cuda_dp4a(v.x, q8[l + 0], sumi);
-        sumi = ggml_cuda_dp4a(v.y, q8[l + 4], sumi);
+        sumi = (__builtin_amdgcn_sdot4(v.x, q8[l + 0], sumi, false));
+        sumi = (__builtin_amdgcn_sdot4(v.y, q8[l + 4], sumi, false));
     }
 
     const float d = ggml_cuda_e8m0_to_fp32(bq4->e) * 0.5f * __low2float(bq8_1->ds);
@@ -330,13 +332,13 @@ static __device__ __forceinline__ float vec_dot_q2_K_q8_1_impl_mmvq(
 
         const int vi = (v >> (2*i)) & 0x03030303;
 
-        sumf_d += d8[i] * (ggml_cuda_dp4a(vi, u[i], 0) * (sc & 0xF)); // SIMD dot product
+        sumf_d += d8[i] * ((__builtin_amdgcn_sdot4(vi, u[i], 0, false)) * (sc & 0xF)); // SIMD dot product
 
         // fill int with 4x m
         int m = sc >> 4;
         m |= m <<  8;
         m |= m << 16;
-        sumf_m += d8[i] * ggml_cuda_dp4a(m, u[i], 0); // multiply constant q2_K part with sum of q8_1 values
+        sumf_m += d8[i] * (__builtin_amdgcn_sdot4(m, u[i], 0, false)); // multiply constant q2_K part with sum of q8_1 values
     }
 
     const float2 dm2f = __half22float2(dm2);
@@ -362,13 +364,13 @@ static __device__ __forceinline__ float vec_dot_q2_K_q8_1_impl_mmq(
 
 #pragma unroll
         for (int i = i0; i < i0 + QI8_1/2; ++i) {
-            sumi_d0 = ggml_cuda_dp4a(v[i], u[i], sumi_d0);
+            sumi_d0 = (__builtin_amdgcn_sdot4(v[i], u[i], sumi_d0, false));
         }
         sumf_d8 += dm2f0.x * sumi_d0;
 
 #pragma unroll
         for (int i = i0 + QI8_1/2; i < i0 + QI8_1; ++i) {
-            sumi_d1 = ggml_cuda_dp4a(v[i], u[i], sumi_d1);
+            sumi_d1 = (__builtin_amdgcn_sdot4(v[i], u[i], sumi_d1, false));
         }
         sumf_d8 += dm2f1.x * sumi_d1;
 
@@ -380,14 +382,14 @@ static __device__ __forceinline__ float vec_dot_q2_K_q8_1_impl_mmq(
             int sumi_m0 = 0;
 #pragma unroll
             for (int i = i0; i < i0 + QI8_1/2; ++i) {
-                sumi_m0 = ggml_cuda_dp4a(0x01010101, u[i], sumi_m0);
+                sumi_m0 = (__builtin_amdgcn_sdot4(0x01010101, u[i], sumi_m0, false));
             }
             sumf_d8 -= dm2f0.y * sumi_m0;
 
             int sumi_m1 = 0;
 #pragma unroll
             for (int i = i0 + QI8_1/2; i < i0 + QI8_1; ++i) {
-                sumi_m1 = ggml_cuda_dp4a(0x01010101, u[i], sumi_m1);
+                sumi_m1 = (__builtin_amdgcn_sdot4(0x01010101, u[i], sumi_m1, false));
             }
             sumf_d8 -= dm2f1.y * sumi_m1;
         }
@@ -426,7 +428,7 @@ static __device__ __forceinline__ float vec_dot_q3_K_q8_1_impl_mmvq(
 
         const int vi = __vsubss4(vil, vih);
 
-        sumf += d8[i] * (ggml_cuda_dp4a(vi, u[i], 0) * sc); // SIMD dot product
+        sumf += d8[i] * ((__builtin_amdgcn_sdot4(vi, u[i], 0, false)) * sc); // SIMD dot product
     }
 
     return d3 * sumf;
@@ -445,7 +447,7 @@ static __device__ __forceinline__ float vec_dot_q3_K_q8_1_impl_mmq(
 
 #pragma unroll
         for (int i = i0; i < i0 + QI8_1/2; ++i) {
-            sumi_sc = ggml_cuda_dp4a(v[i], u[i], sumi_sc); // SIMD dot product
+            sumi_sc = (__builtin_amdgcn_sdot4(v[i], u[i], sumi_sc, false)); // SIMD dot product
         }
 
         sumi += sumi_sc * scales[i0 / (QI8_1/2)];
@@ -470,8 +472,8 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_vmmq(
         const int v0i = (v[0] >> (4*i)) & 0x0F0F0F0F;
         const int v1i = (v[1] >> (4*i)) & 0x0F0F0F0F;
 
-        const int dot1 = ggml_cuda_dp4a(v1i, u[2*i+1], ggml_cuda_dp4a(v0i, u[2*i+0], 0)); // SIMD dot product
-        const int dot2 = ggml_cuda_dp4a(0x01010101, u[2*i+1], ggml_cuda_dp4a(0x01010101, u[2*i+0], 0)); // sum of u
+        const int dot1 = (__builtin_amdgcn_sdot4(v1i, u[2*i+1], (__builtin_amdgcn_sdot4(v0i, u[2*i+0], 0, false)), false)); // SIMD dot product
+        const int dot2 = (__builtin_amdgcn_sdot4(0x01010101, u[2*i+1], (__builtin_amdgcn_sdot4(0x01010101, u[2*i+0], 0, false)), false)); // sum of u
 
         sumf_d += d8[i] * (dot1 * sc[i]);
         sumf_m += d8[i] * (dot2 * m[i]);  // multiply constant part of q4_K with sum of q8_1 values
@@ -496,7 +498,7 @@ static __device__ __forceinline__ float vec_dot_q4_K_q8_1_impl_mmq(
 
 #pragma unroll
         for (int j = 0; j < QI8_1; ++j) {
-            sumi_d = ggml_cuda_dp4a((v[j] >> (4*i)) & 0x0F0F0F0F, u[i*QI8_1 + j], sumi_d); // SIMD dot product
+            sumi_d = (__builtin_amdgcn_sdot4((v[j] >> (4*i)) & 0x0F0F0F0F, u[i*QI8_1 + j], sumi_d, false)); // SIMD dot product
         }
 
         const float2 ds8f = __half22float2(ds8[i]);
@@ -532,8 +534,8 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1_impl_vmmq(
         const int v0i = vl0i | vh0i;
         const int v1i = vl1i | vh1i;
 
-        const int dot1 = ggml_cuda_dp4a(v0i, u[2*i+0], ggml_cuda_dp4a(v1i, u[2*i+1], 0)); // SIMD dot product
-        const int dot2 = ggml_cuda_dp4a(0x01010101, u[2*i+0], ggml_cuda_dp4a(0x01010101, u[2*i+1], 0)); // sum of u
+        const int dot1 = (__builtin_amdgcn_sdot4(v0i, u[2*i+0], (__builtin_amdgcn_sdot4(v1i, u[2*i+1], 0, false)), false)); // SIMD dot product
+        const int dot2 = (__builtin_amdgcn_sdot4(0x01010101, u[2*i+0], (__builtin_amdgcn_sdot4(0x01010101, u[2*i+1], 0, false)), false)); // sum of u
 
         sumf_d += d8[i] * (dot1 * sc[i]);
         sumf_m += d8[i] * (dot2 * m[i]);
@@ -559,7 +561,7 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1_impl_mmq(
 
 #pragma unroll
         for (int j = 0; j < QI8_1; ++j) {
-            sumi_d = ggml_cuda_dp4a(v[i*QI8_1 + j], u[i*QI8_1 + j], sumi_d); // SIMD dot product
+            sumi_d = (__builtin_amdgcn_sdot4(v[i*QI8_1 + j], u[i*QI8_1 + j], sumi_d, false)); // SIMD dot product
         }
 
         const float2 ds8f = __half22float2(ds8[i]);
@@ -593,7 +595,7 @@ static __device__ __forceinline__ float vec_dot_q6_K_q8_1_impl_mmvq(
 
         const int vi = __vsubss4((vil | vih), 0x20202020); // vi = (vil | vih) - 32
 
-        sumf += d8[i] * (ggml_cuda_dp4a(vi, u[i], 0) * sc); // SIMD dot product
+        sumf += d8[i] * ((__builtin_amdgcn_sdot4(vi, u[i], 0, false)) * sc); // SIMD dot product
     }
 
     return d*sumf;
@@ -615,11 +617,11 @@ static __device__ __forceinline__ float vec_dot_q6_K_q8_1_impl_mmq(
 
 #pragma unroll
         for (int i = i0; i < i0 + 2; ++i) {
-            sumi_d.x = ggml_cuda_dp4a(v[2*i+0], u[2*i+0], sumi_d.x); // SIMD dot product
-            sumi_d.x = ggml_cuda_dp4a(v[2*i+1], u[2*i+1], sumi_d.x); // SIMD dot product
+            sumi_d.x = (__builtin_amdgcn_sdot4(v[2*i+0], u[2*i+0], sumi_d.x, false)); // SIMD dot product
+            sumi_d.x = (__builtin_amdgcn_sdot4(v[2*i+1], u[2*i+1], sumi_d.x, false)); // SIMD dot product
 
-            sumi_d.y = ggml_cuda_dp4a(v[2*i+4], u[2*i+4], sumi_d.y); // SIMD dot product
-            sumi_d.y = ggml_cuda_dp4a(v[2*i+5], u[2*i+5], sumi_d.y); // SIMD dot product
+            sumi_d.y = (__builtin_amdgcn_sdot4(v[2*i+4], u[2*i+4], sumi_d.y, false)); // SIMD dot product
+            sumi_d.y = (__builtin_amdgcn_sdot4(v[2*i+5], u[2*i+5], sumi_d.y, false)); // SIMD dot product
         }
 
         sumf_d += d8[i0/4] * (sc_reg[i0/2+0]*sumi_d.x + sc_reg[i0/2+1]*sumi_d.y);
@@ -911,12 +913,12 @@ static __device__ __forceinline__ float vec_dot_iq2_xxs_q8_1(
         const int signs0 = __vcmpne4(((signs_packed & 0x03) << 7) | ((signs_packed & 0x0C) << 21), 0x00000000);
         const int grid0 = __vsub4(grid_pos[0] ^ signs0, signs0);
         const int u0 = get_int_b4(bq8_1[iqs/2].qs, k0 + 0);
-        sumi = ggml_cuda_dp4a(grid0, u0, sumi);
+        sumi = (__builtin_amdgcn_sdot4(grid0, u0, sumi, false));
 
         const int signs1 = __vcmpne4(((signs_packed & 0x30) << 3) | ((signs_packed & 0xC0) << 17), 0x00000000);
         const int grid1 = __vsub4(grid_pos[1] ^ signs1, signs1);
         const int u1 = get_int_b4(bq8_1[iqs/2].qs, k0 + 1);
-        sumi = ggml_cuda_dp4a(grid1, u1, sumi);
+        sumi = (__builtin_amdgcn_sdot4(grid1, u1, sumi, false));
     }
 
     const int ls = aux32 >> 28;
@@ -952,11 +954,11 @@ static __device__ __forceinline__ float vec_dot_iq2_xs_q8_1(
         const int u1 = get_int_b4(bq8_1[iqs/2].qs, l0 + 1);
 
         if (l0 < 4) {
-            sumi0 = ggml_cuda_dp4a(grid_l, u0, sumi0);
-            sumi0 = ggml_cuda_dp4a(grid_h, u1, sumi0);
+            sumi0 = (__builtin_amdgcn_sdot4(grid_l, u0, sumi0, false));
+            sumi0 = (__builtin_amdgcn_sdot4(grid_h, u1, sumi0, false));
         } else {
-            sumi1 = ggml_cuda_dp4a(grid_l, u0, sumi1);
-            sumi1 = ggml_cuda_dp4a(grid_h, u1, sumi1);
+            sumi1 = (__builtin_amdgcn_sdot4(grid_l, u0, sumi1, false));
+            sumi1 = (__builtin_amdgcn_sdot4(grid_h, u1, sumi1, false));
         }
     }
     const int sumi = (sumi0*ls0 + sumi1*ls1 + (sumi0 + sumi1)/2)/4;
@@ -999,11 +1001,11 @@ static __device__ __forceinline__ float vec_dot_iq2_s_q8_1(
         const int u1 = get_int_b4(bq8_1[iqs/2].qs, l0 + 1);
 
         if (l0 < 4) {
-            sumi0 = ggml_cuda_dp4a(grid_l, u0, sumi0);
-            sumi0 = ggml_cuda_dp4a(grid_h, u1, sumi0);
+            sumi0 = (__builtin_amdgcn_sdot4(grid_l, u0, sumi0, false));
+            sumi0 = (__builtin_amdgcn_sdot4(grid_h, u1, sumi0, false));
         } else {
-            sumi1 = ggml_cuda_dp4a(grid_l, u0, sumi1);
-            sumi1 = ggml_cuda_dp4a(grid_h, u1, sumi1);
+            sumi1 = (__builtin_amdgcn_sdot4(grid_l, u0, sumi1, false));
+            sumi1 = (__builtin_amdgcn_sdot4(grid_h, u1, sumi1, false));
         }
     }
     const int sumi = (sumi0*ls0 + sumi1*ls1 + (sumi0 + sumi1)/2)/4;
@@ -1037,8 +1039,8 @@ static __device__ __forceinline__ float vec_dot_iq3_xxs_q8_1(
         const int u0 = get_int_b4(bq8_1[iqs/2].qs, l0 + 0);
         const int u1 = get_int_b4(bq8_1[iqs/2].qs, l0 + 1);
 
-        sumi = ggml_cuda_dp4a(grid_l, u0, sumi);
-        sumi = ggml_cuda_dp4a(grid_h, u1, sumi);
+        sumi = (__builtin_amdgcn_sdot4(grid_l, u0, sumi, false));
+        sumi = (__builtin_amdgcn_sdot4(grid_h, u1, sumi, false));
     }
 
     const int ls = aux32 >> 28;
@@ -1080,8 +1082,8 @@ static __device__ __forceinline__ float vec_dot_iq3_s_q8_1(
         const int u0 = get_int_b4(bq8_1[iqs/2].qs, l0 + 0);
         const int u1 = get_int_b4(bq8_1[iqs/2].qs, l0 + 1);
 
-        sumi = ggml_cuda_dp4a(grid_l, u0, sumi);
-        sumi = ggml_cuda_dp4a(grid_h, u1, sumi);
+        sumi = (__builtin_amdgcn_sdot4(grid_l, u0, sumi, false));
+        sumi = (__builtin_amdgcn_sdot4(grid_h, u1, sumi, false));
     }
 
     sumi *= 1 + 2*((bq3->scales[iqs/4] >> ((iqs << 1) & 0x04)) & 0x0F);
@@ -1113,8 +1115,8 @@ static __device__ __forceinline__ float vec_dot_iq1_s_q8_1(
         const int u0 = get_int_b4(bq8_1[iqs].qs, l0 + 0);
         const int u1 = get_int_b4(bq8_1[iqs].qs, l0 + 1);
 
-        sumi = ggml_cuda_dp4a(grid0, u0, sumi);
-        sumi = ggml_cuda_dp4a(grid1, u1, sumi);
+        sumi = (__builtin_amdgcn_sdot4(grid0, u0, sumi, false));
+        sumi = (__builtin_amdgcn_sdot4(grid1, u1, sumi, false));
     }
 
     const float  d1q   = __half2float(bq1->d) * (((qh >> 11) & 0x0E) + 1);
@@ -1148,13 +1150,13 @@ static __device__ __forceinline__ float vec_dot_iq1_m_q8_1(
         const int u0 = get_int_b4(bq8_1[iqs].qs, l0 + 0);
         const int u1 = get_int_b4(bq8_1[iqs].qs, l0 + 1);
 
-        sumi[l0/4] = ggml_cuda_dp4a(grid0, u0, sumi[l0/4]);
-        sumi[l0/4] = ggml_cuda_dp4a(grid1, u1, sumi[l0/4]);
+        sumi[l0/4] = (__builtin_amdgcn_sdot4(grid0, u0, sumi[l0/4], false));
+        sumi[l0/4] = (__builtin_amdgcn_sdot4(grid1, u1, sumi[l0/4], false));
 
         const float delta = -1.0f + IQ1M_DELTA - (qhl & 0x08) * (2.0f*IQ1M_DELTA/0x08);
         int sumy = 0;
-        sumy = ggml_cuda_dp4a(u0, 0x01010101, sumy);
-        sumy = ggml_cuda_dp4a(u1, 0x01010101, sumy);
+        sumy = (__builtin_amdgcn_sdot4(u0, 0x01010101, sumy, false));
+        sumy = (__builtin_amdgcn_sdot4(u1, 0x01010101, sumy, false));
         sumf[l0/4] += delta*sumy;
     }
 
@@ -1186,8 +1188,8 @@ static __device__ __forceinline__ float vec_dot_iq4_nl_q8_1(
         const int aux_q4 = get_int_b2(bq4->qs, iqs + l);
         const int2 v = get_int_from_table_16(aux_q4, kvalues_iq4nl);
 
-        sumi = ggml_cuda_dp4a(v.x, q8[l + 0], sumi);
-        sumi = ggml_cuda_dp4a(v.y, q8[l + 4], sumi);
+        sumi = (__builtin_amdgcn_sdot4(v.x, q8[l + 0], sumi, false));
+        sumi = (__builtin_amdgcn_sdot4(v.y, q8[l + 4], sumi, false));
     }
 
     const float d = __half2float(bq4->d) * __low2float(bq8_1->ds);
@@ -1211,8 +1213,8 @@ static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(
         const int u0 = get_int_b4(bq8_1[iqs/4].qs, j + 0);
         const int u1 = get_int_b4(bq8_1[iqs/4].qs, j + 4);
 
-        sumi = ggml_cuda_dp4a(v.x, u0, sumi);
-        sumi = ggml_cuda_dp4a(v.y, u1, sumi);
+        sumi = (__builtin_amdgcn_sdot4(v.x, u0, sumi, false));
+        sumi = (__builtin_amdgcn_sdot4(v.y, u1, sumi, false));
     }
 
     const int ls = ((bq4->scales_l[iqs/8] >> (iqs & 0x04)) & 0x0F) | (((bq4->scales_h >> (iqs/2)) & 0x03) << 4);
