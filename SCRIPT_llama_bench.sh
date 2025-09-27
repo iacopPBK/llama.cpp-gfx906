@@ -13,7 +13,8 @@ export GGML_BACKEND_HIP=1
 export HCC_AMDGPU_TARGET=gfx906
 
 # Path to your model file - update this to your actual model path
-MODEL_PATH="/home/iacopo/Downloads/Qwen3-30B-A3B-Thinking-2507-Q4_0.gguf"
+MODEL_PATH=""
+
 
 # Default benchmark parameters (matching server configuration)
 BENCH_PARAMS=(
@@ -21,6 +22,7 @@ BENCH_PARAMS=(
     -ngl 99                    # Offload all layers to GPU
     -b 1024                    # Batch size (matches server)
     -t $(nproc)                # Use all CPU threads
+     -d 1024
     -fa 1                     # Enable flash attention (GFX906 optimized
     -ctk q8_0                  # q8_0 quantized K cache (matches server)
     -ctv q8_0                  # q8_0 quantized V cache (matches server)

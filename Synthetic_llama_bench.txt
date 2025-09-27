@@ -1,0 +1,96 @@
+Vanilla llamacpp FA on KV Q8_0
+Device 0: AMD Instinct MI50/MI60, gfx906:sramecc+:xnack- (0x906), VMM: no, Wave Size: 64
+| model                          | type_k | type_v | fa |	     test |		     t/s  |
+| ------------------------------ | -----: | -----: | -: | --------------: | -------------------:  |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |	    pp512 |	  1793.78 ± 0.50 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |	   pp1024 |	  1750.35 ± 0.27 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |	   pp2048 |	  1653.97 ± 0.49 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |	   pp4096 |	 1424.06 ± 28.82 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |	    tg128 |	    84.86 ± 0.54 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |	    tg256 |	    82.51 ± 0.99 |
+build: 72b24d96 (6602)
+
+Device 0: AMD Instinct MI50/MI60, gfx906:sramecc+:xnack- (0x906), VMM: no, Wave Size: 64
+| model                          | type_k | type_v | fa |	     test |		     t/s  |
+| ------------------------------ | -----: | -----: | -: | --------------: | -------------------:  |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |   pp512 @ d1024 |	  1590.85 ± 0.39 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |  pp1024 @ d1024 |	  1559.56 ± 0.51 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |  pp2048 @ d1024 |	  1482.26 ± 1.97 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |  pp4096 @ d1024 |	 1261.73 ± 35.06 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |   tg128 @ d1024 |	    72.70 ± 0.86 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |   tg256 @ d1024 |	    68.87 ± 1.37 |
+build: 72b24d96 (6602)
+
+
+llamacpp-gfx906-v2 FA on KV Q8_0
+Device 0: AMD Instinct MI50/MI60, gfx906:sramecc+:xnack- (0x906), VMM: no, Wave Size: 64
+| model                          | type_k | type_v | fa |	     test |		     t/s  |
+| ------------------------------ | -----: | -----: | -: | --------------: | -------------------:  |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |	    pp512 |	  1797.05 ± 0.31 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |	   pp1024 |	  1755.67 ± 0.47 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |	   pp2048 |	  1661.81 ± 0.11 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |	   pp4096 |	  1496.66 ± 1.44 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |	    tg128 |	   104.15 ± 0.03 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |	    tg256 |	   102.79 ± 1.14 |
+build: 051b3382 (6535) - fork
+
+Device 0: AMD Instinct MI50/MI60, gfx906:sramecc+:xnack- (0x906), VMM: no, Wave Size: 64
+| model                          | type_k | type_v | fa |	     test |		     t/s  |
+| ------------------------------ | -----: | -----: | -: | --------------: | -------------------:  |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |   pp512 @ d1024 |	  1574.58 ± 0.77 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |  pp1024 @ d1024 |	  1556.18 ± 0.29 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |  pp2048 @ d1024 |	  1488.85 ± 0.39 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |  pp4096 @ d1024 |	 1318.91 ± 29.91 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |   tg128 @ d1024 |	    84.57 ± 0.72 |
+| qwen3 4B Q4_0                  |   q8_0 |   q8_0 |  1 |   tg256 @ d1024 |	    81.21 ± 1.48 |
+build: 051b3382 (6535) - fork
+
+
+Vanilla llamacpp FA on KV Q8_0
+Device 0: AMD Instinct MI50/MI60, gfx906:sramecc+:xnack- (0x906), VMM: no, Wave Size: 64
+| model                          | type_k | type_v | fa |	     test |		     t/s  |
+| ------------------------------ | -----: | -----: | -: | --------------: | -------------------:  |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |	    pp512 |	  1286.98 ± 9.72 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |	   pp1024 |	  1268.94 ± 6.56 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |	   pp2048 |	  1207.67 ± 2.01 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |	   pp4096 |	  1091.78 ± 1.20 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |	    tg128 |	    66.54 ± 0.05 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |	    tg256 |	    66.47 ± 0.03 |
+build: 72b24d96 (6602)
+
+Device 0: AMD Instinct MI50/MI60, gfx906:sramecc+:xnack- (0x906), VMM: no, Wave Size: 64
+| model                          | type_k | type_v | fa |	     test |		     t/s  |
+| ------------------------------ | -----: | -----: | -: | --------------: | -------------------:  |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |   pp512 @ d1024 |	  1173.63 ± 2.59 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |  pp1024 @ d1024 |	  1145.44 ± 5.54 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |  pp2048 @ d1024 |	 1053.87 ± 20.22 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |  pp4096 @ d1024 |	  864.03 ± 25.91 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |   tg128 @ d1024 |	    55.94 ± 0.42 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |   tg256 @ d1024 |	    54.50 ± 0.40 |
+build: 72b24d96 (6602)
+
+
+llamacpp-gfx906-v2 FA on KV Q8_0
+Device 0: AMD Instinct MI50/MI60, gfx906:sramecc+:xnack- (0x906), VMM: no, Wave Size: 64
+| model                          | type_k | type_v | fa |	     test |		     t/s  |
+| ------------------------------ | -----: | -----: | -: | --------------: | -------------------:  |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |	    pp512 |	  1284.54 ± 9.93 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |	   pp1024 |	  1265.53 ± 6.84 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |	   pp2048 |	  1207.41 ± 1.53 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |	   pp4096 |	  1095.08 ± 1.01 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |	    tg128 |	    76.01 ± 0.07 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |	    tg256 |	    75.91 ± 0.04 |
+build: 051b3382 (6535) - fork
+
+llamacpp-gfx906-v2 FA on KV Q8_0 - depth 1024
+Device 0: AMD Instinct MI50/MI60, gfx906:sramecc+:xnack- (0x906), VMM: no, Wave Size: 64
+| model                          | type_k | type_v | fa |	     test |		     t/s  |
+| ------------------------------ | -----: | -----: | -: | --------------: | -------------------:  |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |   pp512 @ d1024 |	  1174.89 ± 2.06 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |  pp1024 @ d1024 |	  1146.86 ± 6.10 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |  pp2048 @ d1024 |	  1096.24 ± 4.98 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |  pp4096 @ d1024 |	  990.42 ± 20.11 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |   tg128 @ d1024 |	    66.25 ± 0.01 |
+| qwen3moe 30B.A3B Q4_0          |   q8_0 |   q8_0 |  1 |   tg256 @ d1024 |	    66.11 ± 0.36 |
+build: 051b3382 (6535) - fork
+

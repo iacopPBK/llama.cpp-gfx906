@@ -1,10 +1,8 @@
 #include "common.cuh"
 #include "fattn-common.cuh"
 #include "fattn-mma-f16.cuh"
-#include "fattn-tile-f16-gfx906.cuh"
-#include "fattn-tile-f32.cuh"
+#include "fattn-tile.cuh"
 #include "fattn-vec-f16.cuh"
-#include "fattn-vec-f16-gfx906-d128.cuh"  // GFX906-optimized D=128 kernel
 #include "fattn-vec-f32.cuh"
 #include "fattn-wmma-f16.cuh"
 #include "fattn.cuh"
@@ -125,30 +123,10 @@ static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, gg
         return;                                                             \
     }                                                                       \
 
-// GFX906-specific macro for D=128 kernels
-#define FATTN_VEC_F16_GFX906_D128_CASE(type_K, type_V)                          \
-    if (Q->ne[0] == 128 && K->type == (type_K) && V->type == (type_V)) {        \
-        ggml_cuda_flash_attn_ext_vec_f16_gfx906_d128_case<type_K, type_V>(ctx, dst); \
-        return;                                                                 \
-    }                                                                           \
-
 static void ggml_cuda_flash_attn_ext_vec_f16(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_tensor * Q = dst->src[0];
     ggml_tensor * K = dst->src[1];
     ggml_tensor * V = dst->src[2];
-    
-    // Check if this is GFX906 and use optimized kernel
-    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
-    const bool is_gfx906 = (cc == GGML_CUDA_CC_VEGA20);
-    
-    // GFX906-optimized D=128 kernels (Phase A: Optimized dequantization with working wave reductions)
-    if (is_gfx906 && Q->ne[0] == 128) {
-        FATTN_VEC_F16_GFX906_D128_CASE(GGML_TYPE_F16,  GGML_TYPE_F16)
-        FATTN_VEC_F16_GFX906_D128_CASE(GGML_TYPE_Q8_0, GGML_TYPE_Q8_0)
-        FATTN_VEC_F16_GFX906_D128_CASE(GGML_TYPE_Q4_0, GGML_TYPE_Q4_0)
-        FATTN_VEC_F16_GFX906_D128_CASE(GGML_TYPE_Q5_0, GGML_TYPE_Q5_0)
-        // Fall through to standard kernels for other combinations
-    }
 
 #ifdef GGML_CUDA_FA_ALL_QUANTS
     FATTN_VEC_F16_CASE( 64, GGML_TYPE_F16, GGML_TYPE_Q4_0)
@@ -292,8 +270,7 @@ static void ggml_cuda_flash_attn_ext_vec_f32(ggml_backend_cuda_context & ctx, gg
 // Best FlashAttention kernel for a specific GPU:
 enum best_fattn_kernel {
     BEST_FATTN_KERNEL_NONE     =   0,
-    BEST_FATTN_KERNEL_TILE_F32 = 200,
-    BEST_FATTN_KERNEL_TILE_F16 = 210,
+    BEST_FATTN_KERNEL_TILE     = 200,
     BEST_FATTN_KERNEL_VEC_F32  = 100,
     BEST_FATTN_KERNEL_VEC_F16  = 110,
     BEST_FATTN_KERNEL_WMMA_F16 = 300,
@@ -410,7 +387,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         const bool mma_faster_for_bs1 = gqa_opt_applies && !mma_needs_data_conversion &&
             (cc < GGML_CUDA_CC_ADA_LOVELACE || mma_faster_for_rtx4000);
         if (Q->ne[1] == 1 && can_use_vector_kernel && !mma_faster_for_bs1) {
-            if (prec == GGML_PREC_DEFAULT && fast_fp16_available(cc)) {
+            if (fast_fp16_available(cc)) {
                 return BEST_FATTN_KERNEL_VEC_F16;
             }
             return BEST_FATTN_KERNEL_VEC_F32;
@@ -420,7 +397,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     // Use kernels specializes for small batch sizes if possible:
     if (Q->ne[1] <= 8 && can_use_vector_kernel) {
-        if (prec == GGML_PREC_DEFAULT && fast_fp16_available(cc)) {
+        if (fast_fp16_available(cc)) {
             return BEST_FATTN_KERNEL_VEC_F16;
         }
         return BEST_FATTN_KERNEL_VEC_F32;
@@ -432,16 +409,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     }
 
     // If there is no suitable kernel for tensor cores or small batch sizes, use the generic kernel for large batch sizes:
-    const bool is_gfx906 = (warp_size == 64);
-    
-    if (is_gfx906 && fast_fp16_available(cc)) {
-        return BEST_FATTN_KERNEL_TILE_F16;  // FORCE F16 on GFX906 regardless of precision
-    }
-    
-    if (prec == GGML_PREC_DEFAULT && fast_fp16_available(cc)) {
-        return BEST_FATTN_KERNEL_TILE_F16;
-    }
-    return BEST_FATTN_KERNEL_TILE_F32;
+    return BEST_FATTN_KERNEL_TILE;
 }
 
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -449,11 +417,8 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
         case BEST_FATTN_KERNEL_NONE:
             GGML_ABORT("fatal error");
-        case BEST_FATTN_KERNEL_TILE_F32:
-            ggml_cuda_flash_attn_ext_tile_f32(ctx, dst);
-            break;
-        case BEST_FATTN_KERNEL_TILE_F16:
-            ggml_cuda_flash_attn_ext_tile_f16(ctx, dst);
+        case BEST_FATTN_KERNEL_TILE:
+            ggml_cuda_flash_attn_ext_tile(ctx, dst);
             break;
         case BEST_FATTN_KERNEL_VEC_F32:
             ggml_cuda_flash_attn_ext_vec_f32(ctx, dst);

@@ -1,35 +1,20 @@
 # llama.cpp-gfx906: AMD MI50/MI60/Vega7 fork
 
-**Specialized llama.cpp fork with GFX906 flash attention optimizations for D=128 head dimension models ONLY!**
-
-This fork is specifically optimized for AMD GFX906 architecture (MI50, MI60, Vega VII) and targets models with **head dimension D=128** (such as Qwen3-30B series). The aim of this fork is to be able to run a QWEN30B session with 32K ctx on a single card without loosing too much speed. For this reason the fork won't work with smaller models (you can check the huggingface model sheet for key and value lengths).
+This fork is specifically optimized for AMD GFX906 architecture (MI50, MI60, Vega VII) . The aim of this fork is to maximize prompt-processing and inference on a single card. Compatability is now tested on Qwen3 30B-A3B Thinking 2507 (Q4_0) and Qwen3 4B Instruct 2507 (Q4_0).
 
 ---
 
 ## Acknowledgments
+**Special thanks to [skyne98](https://github.com/skyne98/ggml-gfx906)** for the foundational work, of course to the whole **[ggml-org](https://github.com/ggml-org/llama.cpp)** open source community, and to all the https://discord.gg/sgjdAU9eRC people for the efforts on gfx906 optimization.
 
-**Special thanks to [skyne98](https://github.com/skyne98/ggml-gfx906)** for the foundational work:
-
-- **All GFX906 primitive operations** (`gfx906-wave-primitives*.cuh`)
-- **GEMM kernel implementations** (`gemm-gfx906*.cu/cuh`) 
-- **Memory access patterns** (`gfx906-memory-*.cuh`)
-- **Assembly optimizations** (`gfx906-asm-*`)
-- **Auto-tuning framework** (`gemm-gfx906-autotuner.cuh`)
-
-Thanks to all the https://discord.gg/sgjdAU9eRC community for the efforts on gfx906 optimization.
-
-**This fork builds upon skyne98's GFX906 optimization work, i did focus specifically on flash attention improvements for D=128 models.**
+**The fork is now based on llama.cpp build 051b3382 **
 
 ---
 
-## Key Features of fattn-tile-f16-gfx906.cu
+## Key Features of fattn-vec-f16.cu - forked
 
-- **Native 64-thread wavefront support** (vs 32-thread warps)
-- **Register blocking optimization** (reduction in shared memory accesses)  
-- **V_DOT2_F32_F16 native instruction usage** for dual-FP16 operations
-- **Strategic bank conflict elimination** with optimized padding
-- **Forced F16 precision** for flash attention operations
-- **Optimized for D=128 head dimension** with runtime validation
+- **Replaced bpermute instructions with swizzle** (AMD native warp reductions, main contribution)
+- **V vectors caching** (another nice bump in speed)  
 
 ---
 
@@ -41,53 +26,76 @@ Thanks to all the https://discord.gg/sgjdAU9eRC community for the efforts on gfx
 - **AMD Vega VII** (Vega 20)
 
 ### Supported Models
-- **Models with D=128 head dimension only** it will crash with a message for other D dimensions.
-- Tested extensively with **Qwen3-30B-A3B series** (Q4_0, Q4_1)
-- Compatible with models using similar attention architecture (needs testing!)
+- **All the llamacpp supported models**
+- Tested extensively with **Qwen3-30B-A3B** (Q4_0, Q4_1) and **Qwen3-4B** (Q4_0, Q4_1)
 
 ---
 
-## Performance Improvements
+## Performance Improvements wrt vanilla llamacpp:
 
-Benchmarks on **Qwen3-30B-A3B-Thinking-2507-Q4_0** with **AMD MI50**:
+### Qwen3 4B Q4_0 Model
+| Metric | Standard Depth | Improvement | Depth 1024 | Improvement |
+|--------|---------------|-------------|------------|-------------|
+| **Token Gen (tg128)** | 84.86 → 104.15 t/s | **+22.7%** | 72.70 → 84.57 t/s | **+16.3%** |
+| **Token Gen (tg256)** | 82.51 → 102.79 t/s | **+24.6%** | 68.87 → 81.21 t/s | **+17.9%** |
 
-### Prompt Processing (tokens/second) - llama-bench results
+### Qwen3moe 30B.A3B Q4_0 Model  
+| Metric | Standard Depth | Improvement | Depth 1024 | Improvement |
+|--------|---------------|-------------|------------|-------------|
+| **Token Gen (tg128)** | 66.54 → 76.01 t/s | **+14.2%** | 55.94 → 66.25 t/s | **+18.4%** |
+| **Token Gen (tg256)** | 66.47 → 75.91 t/s | **+14.2%** | 54.50 → 66.11 t/s | **+21.3%** |
 
-**Device 0:** AMD Instinct MI50/MI60, gfx906:sramecc+:xnack- (0x906), VMM: no, Wave Size: 64
+---
 
-#### With KV Quantization (Q8_0)
+### Qwen3 4B Q4_0
 
-| Model | Size | Params | Backend | ngl | threads | n_batch | type_k | type_v | fa | Test | t/s |
-|-------|------|--------|---------|-----|---------|---------|--------|--------|----|------|-----|
-| qwen3moe 30B.A3B Q4 | 16.18 GiB | 30.53 B | ROCm | 99 | 12 | 1024 | q8_0 | q8_0 | 1 | pp512 | 1224.07 ± 6.93 |
-| qwen3moe 30B.A3B Q4 | 16.18 GiB | 30.53 B | ROCm | 99 | 12 | 1024 | q8_0 | q8_0 | 1 | pp1024 | 1168.62 ± 5.28 |
-| qwen3moe 30B.A3B Q4 | 16.18 GiB | 30.53 B | ROCm | 99 | 12 | 1024 | q8_0 | q8_0 | 1 | pp2048 | 1049.93 ± 1.75 |
-| qwen3moe 30B.A3B Q4 | 16.18 GiB | 30.53 B | ROCm | 99 | 12 | 1024 | q8_0 | q8_0 | 1 | pp4096 | 861.60 ± 1.48 |
+### Standard Depth Configuration
 
-#### Without KV Quantization
+| Test | Vanilla llamacpp | gfx906-v2 Fork | Δ Change | % Improvement |
+|------|-----------------|----------------|----------|---------------|
+| **pp512** | 1793.78 t/s | 1797.05 t/s | +3.27 | +0.2% |
+| **pp1024** | 1750.35 t/s | 1755.67 t/s | +5.32 | +0.3% |
+| **pp2048** | 1653.97 t/s | 1661.81 t/s | +7.84 | +0.5% |
+| **pp4096** | 1424.06 t/s | 1496.66 t/s | +72.60 | +5.1% |
+| **tg128** | 84.86 t/s | **104.15 t/s** | +19.29 | **+22.7%** |
+| **tg256** | 82.51 t/s | **102.79 t/s** | +20.28 | **+24.6%** |
 
-| Model | Size | Params | Backend | ngl | threads | n_batch | Test | t/s |
-|-------|------|--------|---------|-----|---------|---------|------|-----|
-| qwen3moe 30B.A3B Q4 | 16.18 GiB | 30.53 B | ROCm | 99 | 12 | 1024 | pp512 | 1167.28 ± 8.12 |
-| qwen3moe 30B.A3B Q4 | 16.18 GiB | 30.53 B | ROCm | 99 | 12 | 1024 | pp1024 | 1084.71 ± 5.40 |
-| qwen3moe 30B.A3B Q4 | 16.18 GiB | 30.53 B | ROCm | 99 | 12 | 1024 | pp2048 | 942.85 ± 1.64 |
-| qwen3moe 30B.A3B Q4 | 16.18 GiB | 30.53 B | ROCm | 99 | 12 | 1024 | pp4096 | 773.98 ± 2.30 |
+### Depth 1024 Configuration
 
-### Generation Speed (ms per token) - llama-bench results
+| Test | Vanilla llamacpp | gfx906-v2 Fork | Δ Change | % Improvement |
+|------|-----------------|----------------|----------|---------------|
+| **pp512** | 1590.85 t/s | 1574.58 t/s | -16.27 | -1.0% |
+| **pp1024** | 1559.56 t/s | 1556.18 t/s | -3.38 | -0.2% |
+| **pp2048** | 1482.26 t/s | 1488.85 t/s | +6.59 | +0.4% |
+| **pp4096** | 1261.73 t/s | 1318.91 t/s | +57.18 | +4.5% |
+| **tg128** | 72.70 t/s | **84.57 t/s** | +11.87 | **+16.3%** |
+| **tg256** | 68.87 t/s | **81.21 t/s** | +12.34 | **+17.9%** |
 
-#### With KV Quantization (Q8_0)
+---
 
-| Model | Size | Params | Backend | ngl | threads | n_batch | type_k | type_v | fa | Test | t/s |
-|-------|------|--------|---------|-----|---------|---------|--------|--------|----|------|-----|
-| qwen3moe 30B.A3B Q4 | 16.18 GiB | 30.53 B | ROCm | 99 | 12 | 1024 | q8_0 | q8_0 | 1 | tg128 | 63.00 ± 0.07 |
-| qwen3moe 30B.A3B Q4 | 16.18 GiB | 30.53 B | ROCm | 99 | 12 | 1024 | q8_0 | q8_0 | 1 | tg256 | 62.83 ± 0.12 |
+### Qwen3moe 30B.A3B Q4_0
 
-#### Without KV Quantization
+### Standard Depth Configuration
 
-| Model | Size | Params | Backend | ngl | threads | n_batch | Test | t/s |
-|-------|------|--------|---------|-----|---------|---------|------|-----|
-| qwen3moe 30B.A3B Q4_0 | 16.18 GiB | 30.53 B | ROCm | 99 | 12 | 1024 | tg128 | 79.92 ± 0.23 |
-| qwen3moe 30B.A3B Q4_0 | 16.18 GiB | 30.53 B | ROCm | 99 | 12 | 1024 | tg256 | 77.87 ± 0.18 |
+| Test | Vanilla llamacpp | gfx906-v2 Fork | Δ Change | % Improvement |
+|------|-----------------|----------------|----------|---------------|
+| **pp512** | 1286.98 t/s | 1284.54 t/s | -2.44 | -0.2% |
+| **pp1024** | 1268.94 t/s | 1265.53 t/s | -3.41 | -0.3% |
+| **pp2048** | 1207.67 t/s | 1207.41 t/s | -0.26 | 0.0% |
+| **pp4096** | 1091.78 t/s | 1095.08 t/s | +3.30 | +0.3% |
+| **tg128** | 66.54 t/s | **76.01 t/s** | +9.47 | **+14.2%** |
+| **tg256** | 66.47 t/s | **75.91 t/s** | +9.44 | **+14.2%** |
+
+### Depth 1024 Configuration
+
+| Test | Vanilla llamacpp | gfx906-v2 Fork | Δ Change | % Improvement |
+|------|-----------------|----------------|----------|---------------|
+| **pp512** | 1173.63 t/s | 1174.89 t/s | +1.26 | +0.1% |
+| **pp1024** | 1145.44 t/s | 1146.86 t/s | +1.42 | +0.1% |
+| **pp2048** | 1053.87 t/s | 1096.24 t/s | +42.37 | +4.0% |
+| **pp4096** | 864.03 t/s | 983.24 t/s | +119.21 | +13.8% |
+| **tg128** | 55.94 t/s | **66.25 t/s** | +10.31 | **+18.4%** |
+| **tg256** | 54.50 t/s | **66.11 t/s** | +11.61 | **+21.3%** |
 
 ---
 
@@ -95,7 +103,7 @@ Benchmarks on **Qwen3-30B-A3B-Thinking-2507-Q4_0** with **AMD MI50**:
 
 ### Prerequisites
 
-- **ROCm 6.4.1** (tested version - other versions may work)
+- **ROCm 7.0.1** (tested version - other versions may work)
 - **CMake 3.21+**
 - **HIP compiler toolchain**
 - **AMD GFX906 GPU** (MI50/MI60/Vega VII)
@@ -108,7 +116,8 @@ Benchmarks on **Qwen3-30B-A3B-Thinking-2507-Q4_0** with **AMD MI50**:
 sudo apt update
 sudo apt install cmake build-essential
 
-# Install ROCm 6.4.1 following AMD's official guide
+# Install ROCm 7.0.1 following AMD's official guide
+# Tensile library for gfx906 must be imported to use this ROCM version
 
 # Verify ROCm installation
 /opt/rocm/bin/rocm-smi
@@ -168,90 +177,6 @@ The build enables these optimizations:
 - `GGML_HIP_GFX906_OPTIMIZED=ON` - GFX906-specific optimizations
 - `CMAKE_HIP_ARCHITECTURES=gfx906` - Target GFX906 architecture
 - Flash attention with F16 precision (hardcoded)
-
----
-
-## Technical Details
-
-### Memory Optimizations
-
-- **KV Cache Padding**: +48 bytes //need to test other values!
-- **Q Cache Padding**: +32 bytes //need to test other values!
-- **Register Blocking**: BLOCK_SIZE=8 for memory access reduction
-
-### Compute Optimizations  
-
-- **64-thread wavefronts**: Native GFX906 wavefront size support
-- **V_DOT2_F32_F16**: Hardware dual-FP16 dot product instructions
-- **DS_SWIZZLE**: Efficient cross-SIMD unit communication
-- **Scalar half operations**: Fixed numerical stability of original fattn-tile-f16 kernel
-
----
-
-## Architecture Details
-
-### GFX906-Specific Files Added
-
-- `fattn-tile-f16-gfx906.cu` - Optimized flash attention kernel
-- `gfx906-*.cuh` - GFX906 primitive operations and memory patterns
-- `gemm-gfx906*.cu/cuh` - GEMM kernel optimizations
-- `gfx906-asm-kernels.s` - Hand-optimized assembly kernels
-
-### Modified Core Files
-
-- `fattn.cu` - GFX906 detection and F16 kernel path forcing
-- `common.cuh` - 64-thread wavefront reduction operations
-- `vendors/hip.h` - Enabled warp sync builtins
-- `CMakeLists.txt` - GFX906 build configuration
-
----
-
-## Flash Attention Kernel Optimizations Explained
-
-The `fattn-tile-f16-gfx906.cu` kernel implements several key optimizations for GFX906 architecture:
-
-### 1. Wavefront-Aware Design
-
-- **64-thread wavefronts**: Uses native GFX906 wavefront size instead of 32-thread CUDA warps
-- **Cross-SIMD communication**: Lane XOR operations for efficient data exchange between compute units
-- **Native intrinsics**: `__lane_id()` and wavefront-specific functions
-
-### 2. Register Blocking Strategy  
-
-```cpp
-#define BLOCK_SIZE 8  // Can be tuned to explore possible performance improvements
-```
-
-- **8x memory access reduction**: Loads 8 dual-FP16 values into registers per MAC operation
-- **Improved ILP**: Better instruction-level parallelism utilizing GFX906's 256 VGPR register file
-- **Cache efficiency**: Reduces shared memory traffic by factor of 8
-
-### 3. Strategic Memory Padding
-
-```cpp 
-#define GFX906_KV_PADDING 48  // Can be tuned to explore possible performance improvements
-#define GFX906_Q_PADDING  32  // Can be tuned to explore possible performance improvements  
-```
-
-- **Bank conflict elimination**: Ensures different rows map to different memory banks
-- **32-bank memory optimization**: Tailored for GFX906's shared memory architecture
-- **D=128 specific**: Padding values optimized for 128-dimension head size
-
-### 4. Native Instruction Usage
-
-- **V_DOT2_F32_F16**: Hardware dual-FP16 dot product via `gfx906_dot2_f16()`
-- **DS_SWIZZLE operations**: Efficient reduction operations in `wave_reduce_max()`
-- **Scalar half precision**: Avoided problematic `half2` operations for numerical stability (necessary to make the f16 precision kernel to work coherently).
-
-### 5. Architecture-Specific Launch Configuration
-
-```cpp
-__launch_bounds__(nwarps*64, 2)  // 64 threads per wavefront, 2 wavefronts per CU
-```
-
-- Designed for GFX906 compute unit structure, maximizes use of available VGPR and LDS memory (slightly lower than 64k)
-
-The result is a flash attention kernel that achieves **5-11% performance improvement** on prompt processing tasks with respect to no flash attention, with the largest gains on longer sequences where memory access patterns matter most.
 
 ---
 

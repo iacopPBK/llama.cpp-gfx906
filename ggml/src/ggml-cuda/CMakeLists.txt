@@ -25,10 +25,14 @@ if (CUDAToolkit_FOUND)
         if (GGML_NATIVE AND CUDAToolkit_VERSION VERSION_GREATER_EQUAL "11.6" AND CMAKE_VERSION VERSION_GREATER_EQUAL "3.24")
             set(CMAKE_CUDA_ARCHITECTURES "native")
         else()
+            if (CUDAToolkit_VERSION VERSION_LESS "13")
+                list(APPEND CMAKE_CUDA_ARCHITECTURES 50-virtual 61-virtual 70-virtual)
+            endif ()
+
+            list(APPEND CMAKE_CUDA_ARCHITECTURES 75-virtual 80-virtual 86-real)
+
             if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL "11.8")
-                set(CMAKE_CUDA_ARCHITECTURES "50-virtual;61-virtual;70-virtual;75-virtual;80-virtual;86-real;89-real")
-            else()
-                set(CMAKE_CUDA_ARCHITECTURES "50-virtual;61-virtual;70-virtual;75-virtual;80-virtual;86-real")
+                list(APPEND CMAKE_CUDA_ARCHITECTURES 89-real)
             endif()
         endif()
     endif()
@@ -44,6 +48,8 @@ if (CUDAToolkit_FOUND)
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
     file(GLOB   SRCS "template-instances/mmq*.cu")
     list(APPEND GGML_SOURCES_CUDA ${SRCS})
+    file(GLOB   SRCS "template-instances/mmf*.cu")
+    list(APPEND GGML_SOURCES_CUDA ${SRCS})
 
     if (GGML_CUDA_FA_ALL_QUANTS)
         file(GLOB   SRCS "template-instances/fattn-vec*.cu")
@@ -56,23 +62,6 @@ if (CUDAToolkit_FOUND)
         list(APPEND GGML_SOURCES_CUDA ${SRCS})
         file(GLOB   SRCS "template-instances/fattn-vec*f16-f16.cu")
         list(APPEND GGML_SOURCES_CUDA ${SRCS})
-    endif()
-
-    # Add GFX906 assembly kernels if optimization is enabled
-    if(GGML_HIP_GFX906_OPTIMIZED AND CMAKE_HIP_COMPILER_ID MATCHES "Clang")
-        # Add assembly source files
-        file(GLOB GFX906_ASM_SOURCES "gfx906-asm-kernels.s")
-        if(GFX906_ASM_SOURCES)
-            list(APPEND GGML_SOURCES_CUDA ${GFX906_ASM_SOURCES})
-            message(STATUS "Added GFX906 assembly kernels: ${GFX906_ASM_SOURCES}")
-        endif()
-        
-        # Add precompiled assembly objects
-        file(GLOB GFX906_ASM_OBJECTS "kernels/*.hsaco")
-        if(GFX906_ASM_OBJECTS)
-            # These are linked as binary objects at runtime
-            message(STATUS "Found GFX906 assembly objects: ${GFX906_ASM_OBJECTS}")
-        endif()
     endif()
 
     ggml_add_backend_library(ggml-cuda

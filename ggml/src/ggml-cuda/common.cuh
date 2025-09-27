@@ -35,16 +35,6 @@
 #include "vendors/cuda.h"
 #endif // defined(GGML_USE_HIP)
 
-#ifdef GGML_HIP_GFX906_OPTIMIZED
-#include "gfx906-config.cuh"
-#include "gfx906-wave-primitives.cuh"
-#include "gfx906-wave-primitives-swizzle.cuh"
-#include "gfx906-memory-isa.cuh"
-#include "gfx906-memory-patterns.cuh"
-#include "gfx906-memcpy.cuh"
-// Note: gfx906-init.cu is compiled separately, not included as header
-#endif
-
 #define STRINGIZE_IMPL(...) #__VA_ARGS__
 #define STRINGIZE(...) STRINGIZE_IMPL(__VA_ARGS__)
 
@@ -85,6 +75,8 @@
 #define GGML_CUDA_CC_IS_RDNA4(cc) (cc >= GGML_CUDA_CC_RDNA4)
 #define GGML_CUDA_CC_IS_GCN(cc)   (cc > GGML_CUDA_CC_OFFSET_AMD && cc < GGML_CUDA_CC_CDNA1)
 #define GGML_CUDA_CC_IS_CDNA(cc)  (cc >= GGML_CUDA_CC_CDNA1 && cc < GGML_CUDA_CC_RDNA1)
+#define GGML_CUDA_CC_IS_CDNA1(cc) (cc >= GGML_CUDA_CC_CDNA1 && cc < GGML_CUDA_CC_CDNA2)
+#define GGML_CUDA_CC_IS_CDNA2(cc) (cc >= GGML_CUDA_CC_CDNA2 && cc < GGML_CUDA_CC_CDNA3)
 #define GGML_CUDA_CC_IS_CDNA3(cc) (cc >= GGML_CUDA_CC_CDNA3 && cc < GGML_CUDA_CC_RDNA1)
 
 // Moore Threads
@@ -335,6 +327,20 @@ static constexpr __device__ int ggml_cuda_get_physical_warp_size() {
 #endif // defined(GGML_USE_HIP) && (defined(__GFX9__) || defined(__GFX8__))
 }
 
+// Maximum number of bytes that can be copied in a single instruction.
+static constexpr __device__ int ggml_cuda_get_max_cpy_bytes() {
+#ifdef GGML_USE_HIP
+    return 16;
+#else
+#if __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
+    return 16;
+#else
+    return 8;
+#endif // __CUDA_ARCH__ >= GGML_CUDA_CC_VOLTA
+#endif // GGML_USE_HIP
+}
+
+
 [[noreturn]]
 static __device__ void no_device_code(
     const char * file_name, const int line, const char * function_name, const int arch, const char * arch_list) {
@@ -396,32 +402,11 @@ static __device__ __forceinline__ int warp_reduce_sum(int x) {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_sum(float x) {
-    if constexpr (width == 64) {
-        // AMD GFX906 proper 64-thread wavefront reduction
-        // Get the lane ID within the current wavefront (0-63)
-        const int lane = __lane_id();  // HIP intrinsic for lane within wavefront
-        
-        // Step 1: Reduce within each 32-thread SIMD unit
-        #pragma unroll  
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            x += __shfl_xor_sync(0xffffffff, x, offset, 32);
-        }
-        
-        // Step 2: Exchange results between SIMD units  
-        // Use partner lane from the other SIMD unit
-        int partner_lane = lane ^ 32;  // XOR bit 5 to switch SIMD units
-        float other_simd = __shfl_sync(0xffffffff, x, partner_lane, 64);
-        
-        // Step 3: Each SIMD unit now has both results, combine them
-        return x + other_simd;
-    } else {
-        // Standard reduction for 32 threads or less
-        #pragma unroll
-        for (int offset = width/2; offset > 0; offset >>= 1) {
-            x += __shfl_xor_sync(0xffffffff, x, offset, width);
-        }
-        return x;
+#pragma unroll
+    for (int offset = width/2; offset > 0; offset >>= 1) {
+        x += __shfl_xor_sync(0xffffffff, x, offset, width);
     }
+    return x;
 }
 
 template<int width = WARP_SIZE>
@@ -477,37 +462,11 @@ static __device__ __forceinline__ int warp_reduce_any(int x) {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_max(float x) {
-    if constexpr (width == 64) {
-#ifdef GGML_HIP_GFX906_OPTIMIZED
-        // Use DS_SWIZZLE optimized reduction for GFX906
-        return wave_reduce_max(x);
-#else
-        // AMD GFX906 proper 64-thread wavefront reduction fallback
-        // Get the lane ID within the current wavefront (0-63)
-        const int lane = __lane_id();  // HIP intrinsic for lane within wavefront
-        
-        // Step 1: Reduce within each 32-thread SIMD unit  
-        #pragma unroll
-        for (int offset = 16; offset > 0; offset >>= 1) {
-            x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, offset, 32));
-        }
-        
-        // Step 2: Exchange results between SIMD units
-        // Use partner lane from the other SIMD unit  
-        int partner_lane = lane ^ 32;  // XOR bit 5 to switch SIMD units
-        float other_simd = __shfl_sync(0xffffffff, x, partner_lane, 64);
-        
-        // Step 3: Each SIMD unit now has both results, combine them
-        return fmaxf(x, other_simd);
-#endif
-    } else {
-        // Standard reduction for 32 threads or less
-        #pragma unroll
-        for (int offset = width/2; offset > 0; offset >>= 1) {
-            x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, offset, width));
-        }
-        return x;
+#pragma unroll
+    for (int offset = width/2; offset > 0; offset >>= 1) {
+        x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, offset, width));
     }
+    return x;
 }
 
 static __device__ __forceinline__ half ggml_cuda_hmax(const half a, const half b) {
@@ -551,30 +510,6 @@ static __device__ __forceinline__ half2 warp_reduce_max(half2 x) {
    GGML_UNUSED(x);
    NO_DEVICE_CODE;
 #endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_PASCAL || defined(GGML_USE_HIP)
-}
-
-template<int width = WARP_SIZE>
-static __device__ __forceinline__ half warp_reduce_max(half x) {
-#ifdef FP16_AVAILABLE
-#if defined(GGML_USE_HIP)
-    // HIP/ROCm 64-thread wavefront
-    if constexpr (width == 64) {
-        for (int offset = 32; offset > 0; offset >>= 1) {
-            x = ggml_cuda_hmax(x, __shfl_xor(x, offset, 64));  // No mask, HIP handles it
-        }
-        return x;
-    }
-#endif
-    // CUDA 32-thread warp fallback
-#pragma unroll
-    for (int offset = width/2; offset > 0; offset >>= 1) {
-        x = ggml_cuda_hmax(x, __shfl_xor_sync(0xffffffff, x, offset, width));
-    }
-    return x;
-#else
-    GGML_UNUSED(x);
-    NO_DEVICE_CODE;
-#endif // FP16_AVAILABLE
 }
 
 #if (defined(CUDART_VERSION) && CUDART_VERSION < CUDART_HMASK) || defined(GGML_USE_HIP) || \
@@ -626,6 +561,45 @@ static __device__ __forceinline__ int ggml_cuda_dp4a(const int a, const int b, i
 #endif // defined(GGML_USE_HIP)
 }
 
+static __device__ __forceinline__ void ggml_cuda_mad(float & acc, const float v, const float u) {
+    acc += v*u;
+}
+
+static __device__ __forceinline__ void ggml_cuda_mad(float & acc, const float2 v, const float2 u) {
+    acc += v.x*u.x;
+    acc += v.y*u.y;
+}
+
+static __device__ __forceinline__ void ggml_cuda_mad(float & acc, const half2 v, const half2 u) {
+#if defined(GGML_USE_HIP) && (defined(RDNA2) || defined(RDNA3) || defined(RDNA4) || defined(__gfx906__) || defined(CDNA))
+    asm volatile("v_dot2_f32_f16 %0, %1, %2, %0" : "+v"(acc) : "v"(v), "v"(u));
+#else
+#ifdef FAST_FP16_AVAILABLE
+    const float2 tmp = __half22float2(v*u);
+    acc += tmp.x + tmp.y;
+#else
+    const float2 tmpv = __half22float2(v);
+    const float2 tmpu = __half22float2(u);
+    acc += tmpv.x * tmpu.x;
+    acc += tmpv.y * tmpu.y;
+#endif // FAST_FP16_AVAILABLE
+#endif // defined(GGML_USE_HIP) && (defined(RDNA2)  || defined(RDNA3) || defined(RDNA4) || defined(GCN5) || defined(CDNA))
+}
+
+// Aligned memory transfers of 8/16 bytes can be faster than 2 transfers with 4 bytes, especially on AMD.
+template <int nbytes>
+static __device__ __forceinline__ void ggml_cuda_memcpy_1(void * __restrict__ dst, const void * __restrict__ src) {
+    if constexpr (nbytes == 4) {
+        *(int *) dst = *(const int *) src;
+    } else if constexpr (nbytes == 8) {
+        *(int2 *) dst = *(const int2 *) src;
+    } else if constexpr (nbytes == 16) {
+        *(int4 *) dst = *(const int4 *) src;
+    } else {
+        static_assert(nbytes == 0 && nbytes == -1, "bad nbytes");
+    }
+}
+
 static __device__ __forceinline__ float ggml_cuda_e8m0_to_fp32(uint8_t x) {
 #if CUDART_VERSION >= 12080
     const nv_bfloat16 e = __nv_cvt_e8m0_to_bf16raw(x);
@@ -642,6 +616,48 @@ static __device__ __forceinline__ float ggml_cuda_e8m0_to_fp32(uint8_t x) {
     memcpy(&result, &bits, sizeof(float));
     return result;
 #endif // CUDART_VERSION >= 12050
+}
+
+// See https://gmplib.org/~tege/divcnst-pldi94.pdf figure 4.1.
+// Precompute mp (m' in the paper) and L such that division
+// can be computed using a multiply (high 32b of 64b result)
+// and a shift:
+//
+// n/d = (mulhi(n, mp) + n) >> L;
+static const uint3 init_fastdiv_values(uint32_t d) {
+    GGML_ASSERT(d != 0);
+
+    // compute L = ceil(log2(d));
+    uint32_t L = 0;
+    while (L < 32 && (uint32_t{ 1 } << L) < d) {
+        L++;
+    }
+
+    uint32_t mp = (uint32_t) ((uint64_t{ 1 } << 32) * ((uint64_t{ 1 } << L) - d) / d + 1);
+    // pack divisor as well to reduce error surface
+    return make_uint3(mp, L, d);
+}
+
+static __device__ __forceinline__ uint32_t fastdiv(uint32_t n, const uint3 fastdiv_values) {
+    // expects fastdiv_values to contain <mp, L, divisor> in <x, y, z>
+    // fastdiv_values.z is unused and optimized away by the compiler.
+    // Compute high 32 bits of n * mp
+    const uint32_t hi = __umulhi(n, fastdiv_values.x);
+    // add n, apply bit shift
+    return (hi + n) >> fastdiv_values.y;
+}
+
+static __device__ __forceinline__ uint32_t fastmodulo(uint32_t n, const uint3 fastdiv_values) {
+    // expects  fastdiv_values to contain <mp, L, divisor> in <x, y, z> (see init_fastdiv_values)
+    return n - fastdiv(n, fastdiv_values) * fastdiv_values.z;
+}
+
+// Calculate both division and modulo at once, returns <n/divisor, n%divisor>
+static __device__ __forceinline__ uint2 fast_div_modulo(uint32_t n, const uint3 fastdiv_values) {
+    // expects  fastdiv_values to contain <mp, L, divisor> in <x, y, z> (see init_fastdiv_values)
+    const uint32_t div_val = fastdiv(n, fastdiv_values);
+    const uint32_t mod_val = n - div_val * fastdiv_values.z;
+    return make_uint2(div_val, mod_val);
 }
 
 typedef void (*dequantize_kernel_t)(const void * vx, const int64_t ib, const int iqs, float2 & v);

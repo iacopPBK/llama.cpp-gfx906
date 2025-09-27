@@ -58,7 +58,7 @@ static __device__ __forceinline__ T vec_dot_fattn_vec_KQ_q4_0(
         const int v = (get_int_b2(K_q4_0[ib].qs, iqs4) >> shift) & 0x0F0F0F0F;
         const int u = Q_q8[k_KQ_0/warp_size];
 
-        const int sumi = (__builtin_amdgcn_sdot4(v, u, 0, false));
+        const int sumi = ggml_cuda_dp4a(v, u, 0);
 
 #ifdef FP16_AVAILABLE
         if (std::is_same<T, half>::value) {
@@ -98,7 +98,7 @@ static __device__ __forceinline__ T vec_dot_fattn_vec_KQ_q4_1(
         const int v = (get_int_b4(K_q4_1[ib].qs, iqs4) >> shift) & 0x0F0F0F0F;
         const int u = Q_q8[k_KQ_0/warp_size];
 
-        const int sumi = (__builtin_amdgcn_sdot4(v, u, 0, false));
+        const int sumi = ggml_cuda_dp4a(v, u, 0);
 
 #ifdef FP16_AVAILABLE
         if (std::is_same<T, half>::value) {
@@ -149,7 +149,7 @@ static __device__ __forceinline__ T vec_dot_fattn_vec_KQ_q5_0(
 
         const int u = Q_q8[k_KQ_0/warp_size];
 
-        const int sumi = (__builtin_amdgcn_sdot4(v, u, 0, false));
+        const int sumi = ggml_cuda_dp4a(v, u, 0);
 
 #ifdef FP16_AVAILABLE
         if (std::is_same<T, half>::value) {
@@ -196,7 +196,7 @@ static __device__ __forceinline__ T vec_dot_fattn_vec_KQ_q5_1(
 
         const int u = Q_q8[k_KQ_0/warp_size];
 
-        const int sumi = (__builtin_amdgcn_sdot4(v, u, 0, false));
+        const int sumi = ggml_cuda_dp4a(v, u, 0);
 
 #ifdef FP16_AVAILABLE
         if (std::is_same<T, half>::value) {
@@ -325,7 +325,7 @@ static __device__ __forceinline__ void quantize_q8_1_to_shared(
     if (d != 0.0f) {
 #pragma unroll
         for (int l = 0; l < int(sizeof(int)); ++l) {
-            q8[l] = __float2int_rn(vals[l] / d);
+            q8[l] = roundf(vals[l] / d);
         }
     }
 
@@ -451,17 +451,6 @@ static __device__ __forceinline__ T dequantize_1_q8_0(const void * __restrict__ 
 #endif // FP16_AVAILABLE
 
     return ((float) d)*((float) q);
-}
-
-// GFX906 optimized Q8_0 dequantization using compiler vectorization hints
-__device__ __forceinline__ half dequantize_q8_0_optimized(
-    const int8_t qs_val,
-    const half scale
-) {
-    // Use explicit FP32 intermediate for better compiler optimization
-    const float scale_f = __half2float(scale);
-    const float result_f = (float)qs_val * scale_f;
-    return __float2half(result_f);
 }
 
 template <typename T>
@@ -658,9 +647,7 @@ static __global__ void flash_attn_stream_k_fixup(
 }
 
 template<int D> // D == head size
-#if !defined(GGML_USE_HIP)
 __launch_bounds__(D, 1)
-#endif // !(defined(GGML_USE_HIP)
 static __global__ void flash_attn_combine_results(
         const float  * __restrict__ VKQ_parts,
         const float2 * __restrict__ VKQ_meta,
@@ -703,10 +690,7 @@ static __global__ void flash_attn_combine_results(
     float VKQ_numerator   = 0.0f;
     float VKQ_denominator = 0.0f;
     for (int l = 0; l < parallel_blocks; ++l) {
-        const float diff = meta[l].x - kqmax;
-        float KQ_max_scale = expf(diff);
-        const uint32_t ftz_mask = 0xFFFFFFFF * (diff > SOFTMAX_FTZ_THRESHOLD);
-        *((uint32_t *) &KQ_max_scale) &= ftz_mask;
+        const float KQ_max_scale = expf(meta[l].x - kqmax);
 
         VKQ_numerator   += KQ_max_scale * VKQ_parts[l*D + tid];
         VKQ_denominator += KQ_max_scale * meta[l].y;
@@ -847,11 +831,10 @@ void launch_fattn(
         CUDA_CHECK(cudaGetLastError());
     }
 
-    int parallel_blocks = 1;
-
     const dim3 block_dim(warp_size, nwarps, 1);
     int max_blocks_per_sm = 1; // Max. number of active blocks limited by occupancy.
     CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&max_blocks_per_sm, fattn_kernel, block_dim.x * block_dim.y * block_dim.z, nbytes_shared));
+    int parallel_blocks = max_blocks_per_sm;
 
     dim3 blocks_num;
     if (stream_k) {
@@ -872,9 +855,6 @@ void launch_fattn(
     } else {
         GGML_ASSERT(K->ne[1] % KQ_row_granularity == 0);
         const int ntiles_KQ = K->ne[1] / KQ_row_granularity; // Max. number of parallel blocks limited by tensor size.
-
-        // parallel_blocks should be at least large enough to achieve max. occupancy for a single wave:
-        parallel_blocks = std::max((nsm * max_blocks_per_sm) / ntiles_total, 1);
 
         // parallel_blocks must not be larger than what the tensor size allows:
         parallel_blocks = std::min(parallel_blocks, ntiles_KQ);
