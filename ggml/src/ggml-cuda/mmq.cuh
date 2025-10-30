@@ -363,11 +363,23 @@ static __device__ __forceinline__ void vec_dot_q4_0_q8_1_dp4a(
 
                 int u[2*VDR_Q4_0_Q8_1_MMQ];
 
+#if defined(GGML_USE_HIP)
+                // Vectorized 128-bit int4 loads for AMD GFX906 - improves memory throughput
+                // Loads 8 integers as two int4 vectors instead of 8 scalar operations
+                const int base_addr = j*MMQ_TILE_Y_K + kyqs;
+                const int4 vec0 = *((const int4 *) &y_qs[base_addr]);
+                const int4 vec1 = *((const int4 *) &y_qs[base_addr + QI4_0]);
+
+                u[0] = vec0.x; u[2] = vec0.y; u[4] = vec0.z; u[6] = vec0.w;
+                u[1] = vec1.x; u[3] = vec1.y; u[5] = vec1.z; u[7] = vec1.w;
+#else
+                // Original scalar loads for CUDA
 #pragma unroll
                 for (int l = 0; l < VDR_Q4_0_Q8_1_MMQ; ++l) {
                     u[2*l+0] = y_qs[j*MMQ_TILE_Y_K + kyqs +  l];
                     u[2*l+1] = y_qs[j*MMQ_TILE_Y_K + kyqs + (l + QI4_0)];
                 }
+#endif
 
                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q4_0_q8_1_impl<VDR_Q4_0_Q8_1_MMQ>
                     (&x_qs[i*(MMQ_TILE_NE_K + 1) + k0/QR4_0], u,
@@ -466,11 +478,23 @@ static __device__ __forceinline__ void vec_dot_q4_1_q8_1_dp4a(
 
                 int u[2*VDR_Q4_1_Q8_1_MMQ];
 
+#if defined(GGML_USE_HIP)
+                // Vectorized 128-bit int4 loads for AMD GFX906 - improves memory throughput
+                // Loads 8 integers as two int4 vectors instead of 8 scalar operations
+                const int base_addr = j*MMQ_TILE_Y_K + kyqs;
+                const int4 vec0 = *((const int4 *) &y_qs[base_addr]);
+                const int4 vec1 = *((const int4 *) &y_qs[base_addr + QI4_1]);
+
+                u[0] = vec0.x; u[2] = vec0.y; u[4] = vec0.z; u[6] = vec0.w;
+                u[1] = vec1.x; u[3] = vec1.y; u[5] = vec1.z; u[7] = vec1.w;
+#else
+                // Original scalar loads for CUDA
 #pragma unroll
                 for (int l = 0; l < VDR_Q4_1_Q8_1_MMQ; ++l) {
                     u[2*l+0] = y_qs[j*MMQ_TILE_Y_K + kyqs +  l];
                     u[2*l+1] = y_qs[j*MMQ_TILE_Y_K + kyqs + (l + QI4_1)];
                 }
+#endif
 
                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q4_1_q8_1_impl<VDR_Q4_1_Q8_1_MMQ>
                     (&x_qs[i*(MMQ_TILE_NE_K + 1) + k0/QR4_1], u,
