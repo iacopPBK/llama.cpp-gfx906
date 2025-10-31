@@ -294,9 +294,6 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     const int kbx  = txi / QI4_0;
     const int kqsx = txi % QI4_0;
 
-    // Phase 1: Load all quantized values into registers (enables parallel loads)
-    int qs_temp[mmq_y / (nrows*nwarps) + 1];
-    int load_count = 0;
 #pragma unroll
     for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
         int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
@@ -305,21 +302,9 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
             i = min(i, i_max);
         }
 
-        const block_q4_0 * __restrict__ bxi = (const block_q4_0 *) x + kbx0 + i*stride + kbx;
-        qs_temp[load_count++] = get_int_b2(bxi->qs, kqsx);
-    }
+        const block_q4_0 * bxi = (const block_q4_0 *) x + kbx0 + i*stride + kbx;
+        const int qs0 = get_int_b2(bxi->qs, kqsx);
 
-    // Phase 2: Store to shared memory (all loads complete, no dependencies)
-    load_count = 0;
-#pragma unroll
-    for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
-        int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
-
-        if (need_check) {
-            i = min(i, i_max);
-        }
-
-        const int qs0 = qs_temp[load_count++];
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
         x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + kbx*(2*QI4_0) + kqsx + 0]     = __vsubss4((qs0 >> 0) & 0x0F0F0F0F, 0x08080808);
         x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + kbx*(2*QI4_0) + kqsx + QI4_0] = __vsubss4((qs0 >> 4) & 0x0F0F0F0F, 0x08080808);
@@ -332,9 +317,6 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     constexpr int rows_per_warp = warp_size / blocks_per_tile_x_row;
     const int kbxd = threadIdx.x % blocks_per_tile_x_row;
 
-    // Phase 1: Load all scales into registers (enables parallel loads)
-    ggml_half d_temp[mmq_y / (nwarps * rows_per_warp) + 1];
-    load_count = 0;
 #pragma unroll
     for (int i0 = 0; i0 < mmq_y; i0 += nwarps * rows_per_warp) {
         int i = i0 + threadIdx.y * rows_per_warp + threadIdx.x / blocks_per_tile_x_row;
@@ -343,24 +325,12 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
             i = min(i, i_max);
         }
 
-        const block_q4_0 * __restrict__ bxi = (const block_q4_0 *) x + kbx0 + i*stride + kbxd;
-        d_temp[load_count++] = bxi->d;
-    }
-
-    // Phase 2: Store to shared memory (all loads complete, no dependencies)
-    load_count = 0;
-#pragma unroll
-    for (int i0 = 0; i0 < mmq_y; i0 += nwarps * rows_per_warp) {
-        int i = i0 + threadIdx.y * rows_per_warp + threadIdx.x / blocks_per_tile_x_row;
-
-        if (need_check) {
-            i = min(i, i_max);
-        }
+        const block_q4_0 * bxi = (const block_q4_0 *) x + kbx0 + i*stride + kbxd;
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
-        x_df[i*MMQ_MMA_TILE_X_K_Q8_0           + kbxd] = d_temp[load_count++];
+        x_df[i*MMQ_MMA_TILE_X_K_Q8_0           + kbxd] = bxi->d;
 #else
-        x_df[i*(MMQ_TILE_NE_K/QI4_0) + i/QI4_0 + kbxd] = d_temp[load_count++];
+        x_df[i*(MMQ_TILE_NE_K/QI4_0) + i/QI4_0 + kbxd] = bxi->d;
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)
     }
 }
