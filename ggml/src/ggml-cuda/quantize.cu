@@ -1,6 +1,79 @@
 #include "quantize.cuh"
 #include <cstdint>
 
+// Vectorized Q8_1 quantization kernel using float4 loads for better bandwidth
+// Each thread processes 4 floats, 8 threads per block_q8_1 output
+__launch_bounds__(CUDA_QUANTIZE_BLOCK_SIZE, 1)
+static __global__ void quantize_q8_1_vec4(
+        const float * __restrict__ x, void * __restrict__ vy,
+        const int64_t ne00, const int64_t s01, const int64_t s02, const int64_t s03,
+        const int64_t ne0, const uint32_t ne1, const uint3 ne2) {
+
+    // Each thread processes 4 consecutive floats
+    const int64_t i0 = ((int64_t)blockDim.x*blockIdx.x + threadIdx.x) * 4;
+
+    if (i0 >= ne0) {
+        return;
+    }
+
+    const int64_t i3 = fastdiv(blockIdx.z, ne2);
+    const int64_t i2 = blockIdx.z - i3*ne2.z;
+    const int64_t i1 = blockIdx.y;
+
+    const int64_t i00 = i0;
+    const int64_t i01 = i1;
+    const int64_t i02 = i2;
+    const int64_t i03 = i3;
+
+    const int64_t i_cont = ((i3*ne2.z + i2) * ne1 + i1) * ne0 + i0;
+
+    block_q8_1 * y = (block_q8_1 *) vy;
+
+    const int64_t ib  = i_cont / QK8_1; // block index
+    const int64_t iqs = i_cont % QK8_1; // quant index within block
+
+    // VECTORIZED LOAD: Load 4 floats at once
+    const float4 * x4 = (const float4 *) x;
+    const int64_t src_offset = (i03*s03 + i02*s02 + i01*s01 + i00) / 4;
+    const float4 xi4 = (i0+3 < ne00) ? x4[src_offset] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    // Find local max of 4 values
+    float amax = fabsf(xi4.x);
+    amax = fmaxf(amax, fabsf(xi4.y));
+    amax = fmaxf(amax, fabsf(xi4.z));
+    amax = fmaxf(amax, fabsf(xi4.w));
+
+    // Find local sum of 4 values
+    float sum = xi4.x + xi4.y + xi4.z + xi4.w;
+
+    // Reduce across 8 threads (32 values / 4 per thread = 8 threads per block_q8_1)
+    // Use DPP-optimized warp reductions (already implemented in common.cuh)
+    amax = warp_reduce_max<8>(amax);  // Uses amd_reduce_max_float with DPP for GFX906
+    sum  = warp_reduce_sum<8>(sum);   // Uses amd_reduce_sum_float with DPP for GFX906
+
+    const float d = amax / 127.0f;
+    const float d_inv = (d != 0.0f) ? (1.0f / d) : 0.0f;
+
+    // Quantize 4 values
+    char4 q4;
+    q4.x = (amax == 0.0f) ? 0 : roundf(xi4.x * d_inv);
+    q4.y = (amax == 0.0f) ? 0 : roundf(xi4.y * d_inv);
+    q4.z = (amax == 0.0f) ? 0 : roundf(xi4.z * d_inv);
+    q4.w = (amax == 0.0f) ? 0 : roundf(xi4.w * d_inv);
+
+    // VECTORIZED STORE: Write 4 int8s as one 32-bit value
+    char4 * yqs4 = (char4 *) y[ib].qs;
+    yqs4[iqs/4] = q4;
+
+    // Only first thread of each group writes the scale/sum
+    if (iqs % QK8_1 != 0) {
+        return;
+    }
+
+    y[ib].ds = make_half2(d, sum);
+}
+
+// Original scalar version (kept as fallback)
 __launch_bounds__(CUDA_QUANTIZE_BLOCK_SIZE, 1)
 static __global__ void quantize_q8_1(
         const float * __restrict__ x, void * __restrict__ vy,
@@ -154,10 +227,14 @@ void quantize_row_q8_1_cuda(
 
     const uint3 ne2_fastdiv = init_fastdiv_values(ne2);
 
-    const int64_t block_num_x = (ne0 + CUDA_QUANTIZE_BLOCK_SIZE - 1) / CUDA_QUANTIZE_BLOCK_SIZE;
+    // Use vectorized kernel: each thread processes 4 values
+    // Total threads needed: ne0/4, with CUDA_QUANTIZE_BLOCK_SIZE threads per block
+    const int64_t block_num_x = (ne0/4 + CUDA_QUANTIZE_BLOCK_SIZE - 1) / CUDA_QUANTIZE_BLOCK_SIZE;
     const dim3 num_blocks(block_num_x, ne1, ne2*ne3);
     const dim3 block_size(CUDA_QUANTIZE_BLOCK_SIZE, 1, 1);
-    quantize_q8_1<<<num_blocks, block_size, 0, stream>>>(x, vy, ne00, s01, s02, s03, ne0, ne1, ne2_fastdiv);
+
+    // Launch vectorized kernel for better memory bandwidth
+    quantize_q8_1_vec4<<<num_blocks, block_size, 0, stream>>>(x, vy, ne00, s01, s02, s03, ne0, ne1, ne2_fastdiv);
     GGML_UNUSED(type_src0);
 }
 
