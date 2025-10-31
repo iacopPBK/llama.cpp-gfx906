@@ -360,33 +360,120 @@ struct ggml_cuda_unroll<1> {
 };
 
 // ================================================================================================
-// AMD GFX906/GCN DPP-BASED WARP REDUCTION OPTIMIZATIONS
+// UNIFIED WARP OPERATIONS WITH FUSED DPP INSTRUCTIONS
 // ================================================================================================
-// This section provides highly optimized warp reduction primitives for AMD GPUs using Data
-// Parallel Primitives (DPP) instructions. These replace generic __shfl_xor_sync operations
-// with architecture-specific DPP instructions that offer significantly better performance.
+// AMD GFX906-Optimized Warp Reduction using Fused DPP+ALU Instructions
 //
-// Organization:
-//   1. Low-level DPP instruction templates
-//   2. Fused DPP+ALU operations
-//   3. Optimized reduction implementations
+// This implementation achieves maximum performance by using fused DPP+operation instructions
+// (e.g., v_add_f32_dpp, v_max_f32_dpp) instead of separate shuffle and arithmetic operations.
+// The number of cycles needed for every shfl operation has been minimized.
+// (Optimal for gfx906 only).
+// Key optimizations:
+// - XOR 1, 2, 8: Fused DPP+operation (1 instruction each) via inline assembly
+// - XOR 4: Dual-bank shuffle (can't fuse, needs 2 DPP + 1 ALU)
+// - XOR 16: DS_SWIZZLE (can't fuse, uses LDS)
+// - Operation tags (AddOp, MaxOp) for compile-time dispatch with zero overhead
+// - Exact barrier scheme from old inline assembly preserved
 // ================================================================================================
 
 #ifdef GGML_USE_HIP
 
-// -------------------------------------------------------------------------------------------------
-// 1. LOW-LEVEL DPP INSTRUCTION TEMPLATES
-// -------------------------------------------------------------------------------------------------
-// Generic templates supporting any 32-bit type (float, int, half2 via int proxy)
-// These are the ONLY inline assembly implementations - all higher-level functions use these.
+// ============================================================================
+// Macro to generate fused DPP+operation instruction wrappers for float
+// ============================================================================
+#define DEFINE_FUSED_DPP_F32(name, barrier, dpp_ctrl, vop_instr)           \
+    static __device__ __forceinline__ float name(float x) {                \
+        float result;                                                       \
+        asm volatile(                                                       \
+            barrier                                                         \
+            vop_instr " %0, %1, %1 " dpp_ctrl " row_mask:0xf bank_mask:0xf" \
+            : "=v"(result) : "v"(x) : "memory"                             \
+        );                                                                  \
+        return result;                                                      \
+    }
 
+// XOR 1 - FIRST operation in reduction (s_nop 4 for EXEC hazard protection)
+DEFINE_FUSED_DPP_F32(hip_add_xor1_f32, "s_nop 4\n", "quad_perm:[1,0,3,2]", "v_add_f32_dpp")
+DEFINE_FUSED_DPP_F32(hip_max_xor1_f32, "s_nop 4\n", "quad_perm:[1,0,3,2]", "v_max_f32_dpp")
+
+// XOR 2 - Subsequent operation (s_nop 1 for VGPR→DPP hazard)
+DEFINE_FUSED_DPP_F32(hip_add_xor2_f32, "s_nop 1\n", "quad_perm:[2,3,0,1]", "v_add_f32_dpp")
+DEFINE_FUSED_DPP_F32(hip_max_xor2_f32, "s_nop 1\n", "quad_perm:[2,3,0,1]", "v_max_f32_dpp")
+
+// XOR 8 - Subsequent operation (s_nop 1)
+DEFINE_FUSED_DPP_F32(hip_add_xor8_f32, "s_nop 1\n", "row_ror:8", "v_add_f32_dpp")
+DEFINE_FUSED_DPP_F32(hip_max_xor8_f32, "s_nop 1\n", "row_ror:8", "v_max_f32_dpp")
+
+#undef DEFINE_FUSED_DPP_F32
+
+// XOR 4 - Dual bank shuffle (can't fuse, needs two DPP moves)
+static __device__ __forceinline__ float hip_shuffle_xor4_f32(float x) {
+    int v_src = __float_as_int(x);
+    int v_dst;
+    asm volatile(
+        "v_mov_b32 %0, %1\n"
+        "s_nop 1\n"
+        "v_mov_b32_dpp %0, %1 row_shl:4 row_mask:0xf bank_mask:0x5\n"
+        "v_mov_b32_dpp %0, %1 row_shr:4 row_mask:0xf bank_mask:0xa\n"
+        : "=v"(v_dst) : "v"(v_src) : "memory"
+    );
+    return __int_as_float(v_dst);
+}
+
+// XOR 16 - DS_SWIZZLE (can't fuse, uses LDS)
+static __device__ __forceinline__ float hip_shuffle_xor16_f32(float x) {
+    int int_val = __float_as_int(x);
+    int result;
+    asm volatile(
+        "ds_swizzle_b32 %0, %1 offset:swizzle(SWAP,16)\n"
+        "s_waitcnt lgkmcnt(0)\n"
+        : "=v"(result) : "v"(int_val) : "memory"
+    );
+    return __int_as_float(result);
+}
+
+// ============================================================================
+// Operation tags for compile-time dispatch
+// ============================================================================
+struct AddOp {
+    static __device__ __forceinline__ float apply(float a, float b) { return a + b; }
+    static __device__ __forceinline__ float xor1(float x) { return hip_add_xor1_f32(x); }
+    static __device__ __forceinline__ float xor2(float x) { return hip_add_xor2_f32(x); }
+    static __device__ __forceinline__ float xor8(float x) { return hip_add_xor8_f32(x); }
+};
+
+struct MaxOp {
+    static __device__ __forceinline__ float apply(float a, float b) { return fmaxf(a, b); }
+    static __device__ __forceinline__ float xor1(float x) { return hip_max_xor1_f32(x); }
+    static __device__ __forceinline__ float xor2(float x) { return hip_max_xor2_f32(x); }
+    static __device__ __forceinline__ float xor8(float x) { return hip_max_xor8_f32(x); }
+};
+
+// ============================================================================
+// Generic warp reduction using fused DPP operations (float only)
+// ============================================================================
+template<int width = WARP_SIZE, typename Op>
+static __device__ __forceinline__ float warp_reduce_amd_f32(float x) {
+    // First DPP needs s_nop 4, subsequent need s_nop 1
+    if (width >= 2)  x = Op::xor1(x);  // XOR 1: FIRST DPP, fused (1 inst, s_nop 4)
+    if (width >= 4)  x = Op::xor2(x);  // XOR 2: Subsequent, fused (1 inst, s_nop 1)
+    if (width >= 8)  x = Op::apply(x, hip_shuffle_xor4_f32(x));  // XOR 4: Can't fuse (3+1 inst, s_nop 1)
+    if (width >= 16) x = Op::xor8(x);  // XOR 8: Subsequent, fused (1 inst, s_nop 1)
+    if (width >= 32) x = Op::apply(x, hip_shuffle_xor16_f32(x)); // XOR 16: ds_swizzle (2+1 inst, s_waitcnt)
+    if (width == 64) x = Op::apply(x, __shfl_xor(x, 32, 64));    // XOR 32: cross-wave for wavefront-64
+    return x;
+}
+
+// ============================================================================
+// Fallback shuffle functions for non-float types (int, half2, etc.)
+// ============================================================================
 template<typename T>
-__device__ __forceinline__ __attribute__((always_inline)) T dpp_quad_perm_xor1(T value) {
+static __device__ __forceinline__ T hip_dpp_xor1(T value) {
     static_assert(sizeof(T) == 4, "DPP operations require 32-bit types");
     int int_val = *reinterpret_cast<int*>(&value);
     int result;
     asm volatile(
-        "s_nop 4\n"  // First DPP: full barrier (EXEC hazard protection)
+        "s_nop 4\n"
         "v_mov_b32_dpp %0, %1 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf"
         : "=v"(result) : "v"(int_val) : "memory"
     );
@@ -394,12 +481,12 @@ __device__ __forceinline__ __attribute__((always_inline)) T dpp_quad_perm_xor1(T
 }
 
 template<typename T>
-__device__ __forceinline__ __attribute__((always_inline)) T dpp_quad_perm_xor2(T value) {
+static __device__ __forceinline__ T hip_dpp_xor2(T value) {
     static_assert(sizeof(T) == 4, "DPP operations require 32-bit types");
     int int_val = *reinterpret_cast<int*>(&value);
     int result;
     asm volatile(
-        "s_nop 1\n"  // Subsequent DPP: reduced barrier (VGPR→DPP hazard)
+        "s_nop 1\n"
         "v_mov_b32_dpp %0, %1 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf"
         : "=v"(result) : "v"(int_val) : "memory"
     );
@@ -407,20 +494,7 @@ __device__ __forceinline__ __attribute__((always_inline)) T dpp_quad_perm_xor2(T
 }
 
 template<typename T>
-__device__ __forceinline__ __attribute__((always_inline)) T dpp_row_ror8(T value) {
-    static_assert(sizeof(T) == 4, "DPP operations require 32-bit types");
-    int int_val = *reinterpret_cast<int*>(&value);
-    int result;
-    asm volatile(
-        "s_nop 1\n"
-        "v_mov_b32_dpp %0, %1 row_ror:8 row_mask:0xf bank_mask:0xf"
-        : "=v"(result) : "v"(int_val) : "memory"
-    );
-    return *reinterpret_cast<T*>(&result);
-}
-
-template<typename T>
-__device__ __forceinline__ __attribute__((always_inline)) T dpp_dual_bank_xor4(T value) {
+static __device__ __forceinline__ T hip_dpp_xor4(T value) {
     static_assert(sizeof(T) == 4, "DPP operations require 32-bit types");
     int v_src = *reinterpret_cast<int*>(&value);
     int v_dst;
@@ -435,7 +509,20 @@ __device__ __forceinline__ __attribute__((always_inline)) T dpp_dual_bank_xor4(T
 }
 
 template<typename T>
-__device__ __forceinline__ __attribute__((always_inline)) T dpp_ds_swizzle_xor16(T value) {
+static __device__ __forceinline__ T hip_dpp_xor8(T value) {
+    static_assert(sizeof(T) == 4, "DPP operations require 32-bit types");
+    int int_val = *reinterpret_cast<int*>(&value);
+    int result;
+    asm volatile(
+        "s_nop 1\n"
+        "v_mov_b32_dpp %0, %1 row_ror:8 row_mask:0xf bank_mask:0xf"
+        : "=v"(result) : "v"(int_val) : "memory"
+    );
+    return *reinterpret_cast<T*>(&result);
+}
+
+template<typename T>
+static __device__ __forceinline__ T hip_dpp_xor16(T value) {
     static_assert(sizeof(T) == 4, "DPP operations require 32-bit types");
     int int_val = *reinterpret_cast<int*>(&value);
     int result;
@@ -447,551 +534,35 @@ __device__ __forceinline__ __attribute__((always_inline)) T dpp_ds_swizzle_xor16
     return *reinterpret_cast<T*>(&result);
 }
 
-// -------------------------------------------------------------------------------------------------
-// 2. FUSED DPP+ALU OPERATIONS
-// -------------------------------------------------------------------------------------------------
-// These combine DPP permutation with arithmetic in a single instruction (10% faster than separate)
-
-// Fused ADD operations for sum reductions
-__device__ __forceinline__ __attribute__((always_inline)) float dpp_quad_perm_xor1_add_f32(float value) {
-    float result;
-    asm volatile(
-        "s_nop 4\n"
-        "v_add_f32_dpp %0, %1, %1 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf"
-        : "=v"(result) : "v"(value) : "memory"
-    );
-    return result;
-}
-
-__device__ __forceinline__ __attribute__((always_inline)) float dpp_quad_perm_xor2_add_f32(float value) {
-    float result;
-    asm volatile(
-        "s_nop 1\n"
-        "v_add_f32_dpp %0, %1, %1 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf"
-        : "=v"(result) : "v"(value) : "memory"
-    );
-    return result;
-}
-
-__device__ __forceinline__ __attribute__((always_inline)) float dpp_row_ror8_add_f32(float value) {
-    float result;
-    asm volatile(
-        "s_nop 1\n"
-        "v_add_f32_dpp %0, %1, %1 row_ror:8 row_mask:0xf bank_mask:0xf"
-        : "=v"(result) : "v"(value) : "memory"
-    );
-    return result;
-}
-
-// Fused MAX operations for max reductions
-__device__ __forceinline__ __attribute__((always_inline)) float dpp_quad_perm_xor1_max_f32(float value) {
-    float result;
-    asm volatile(
-        "s_nop 4\n"
-        "v_max_f32_dpp %0, %1, %1 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf"
-        : "=v"(result) : "v"(value) : "memory"
-    );
-    return result;
-}
-
-__device__ __forceinline__ __attribute__((always_inline)) float dpp_quad_perm_xor2_max_f32(float value) {
-    float result;
-    asm volatile(
-        "s_nop 1\n"
-        "v_max_f32_dpp %0, %1, %1 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf"
-        : "=v"(result) : "v"(value) : "memory"
-    );
-    return result;
-}
-
-__device__ __forceinline__ __attribute__((always_inline)) float dpp_row_ror8_max_f32(float value) {
-    float result;
-    asm volatile(
-        "s_nop 1\n"
-        "v_max_f32_dpp %0, %1, %1 row_ror:8 row_mask:0xf bank_mask:0xf"
-        : "=v"(result) : "v"(value) : "memory"
-    );
-    return result;
-}
-
-// -------------------------------------------------------------------------------------------------
-// 3. MEGA-KERNEL REDUCTIONS (9.5% faster than individual operations)
-// -------------------------------------------------------------------------------------------------
-// These combine entire reduction sequences in single inline assembly blocks for better
-// register allocation and instruction-level parallelism
-
-// 4-thread SUM reduction (XOR2 + XOR1)
-__device__ __forceinline__ __attribute__((always_inline)) float amd_reduce_sum_4_mega(float value) {
-    float temp;
-    asm volatile(
-        "s_nop 1\n"
-        "v_add_f32_dpp %0, %0, %0 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf\n"
-        "s_nop 4\n"
-        "v_add_f32_dpp %0, %0, %0 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf"
-        : "+v"(value), "=v"(temp) :: "memory"
-    );
-    return value;
-}
-
-// 8-thread SUM reduction (XOR4 + XOR2 + XOR1)
-__device__ __forceinline__ __attribute__((always_inline)) float amd_reduce_sum_8_mega(float value) {
-    float temp;
-    asm volatile(
-        "s_nop 4\n"
-        "v_add_f32_dpp %0, %0, %0 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf\n"
-        "s_nop 1\n"
-        "v_add_f32_dpp %0, %0, %0 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf\n"
-        "v_mov_b32 %1, %0\n"
-        "s_nop 1\n"
-        "v_mov_b32_dpp %1, %0 row_shl:4 row_mask:0xf bank_mask:0x5\n"
-        "v_mov_b32_dpp %1, %0 row_shr:4 row_mask:0xf bank_mask:0xa\n"
-        "v_add_f32 %0, %0, %1"
-        : "+v"(value), "=v"(temp) :: "memory"
-    );
-    return value;
-}
-
-// 16-thread SUM reduction (XOR8 + XOR4 + XOR2 + XOR1)
-__device__ __forceinline__ __attribute__((always_inline)) float amd_reduce_sum_16_mega(float value) {
-    float temp;
-    asm volatile(
-        "s_nop 4\n"
-        "v_add_f32_dpp %0, %0, %0 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf\n"
-        "s_nop 1\n"
-        "v_add_f32_dpp %0, %0, %0 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf\n"
-        "v_mov_b32 %1, %0\n"
-        "s_nop 1\n"
-        "v_mov_b32_dpp %1, %0 row_shl:4 row_mask:0xf bank_mask:0x5\n"
-        "v_mov_b32_dpp %1, %0 row_shr:4 row_mask:0xf bank_mask:0xa\n"
-        "v_add_f32 %0, %0, %1\n"
-        "s_nop 1\n"
-        "v_add_f32_dpp %0, %0, %0 row_ror:8 row_mask:0xf bank_mask:0xf"
-        : "+v"(value), "=v"(temp) :: "memory"
-    );
-    return value;
-}
-
-// 32-thread SUM reduction (full chain)
-__device__ __forceinline__ __attribute__((always_inline)) float amd_reduce_sum_32_mega(float value) {
-    float temp;
-    asm volatile(
-        "s_nop 4\n"
-        "v_add_f32_dpp %0, %0, %0 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf\n"
-        "s_nop 1\n"
-        "v_add_f32_dpp %0, %0, %0 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf\n"
-        "v_mov_b32 %1, %0\n"
-        "s_nop 1\n"
-        "v_mov_b32_dpp %1, %0 row_shl:4 row_mask:0xf bank_mask:0x5\n"
-        "v_mov_b32_dpp %1, %0 row_shr:4 row_mask:0xf bank_mask:0xa\n"
-        "v_add_f32 %0, %0, %1\n"
-        "s_nop 1\n"
-        "v_add_f32_dpp %0, %0, %0 row_ror:8 row_mask:0xf bank_mask:0xf\n"
-        "ds_swizzle_b32 %1, %0 offset:swizzle(SWAP,16)\n"
-        "s_waitcnt lgkmcnt(0)\n"
-        "v_add_f32 %0, %0, %1"
-        : "+v"(value), "=v"(temp) :: "memory"
-    );
-    return value;
-}
-
-// 4-thread MAX reduction
-__device__ __forceinline__ __attribute__((always_inline)) float amd_reduce_max_4_mega(float value) {
-    float temp;
-    asm volatile(
-        "s_nop 1\n"
-        "v_max_f32_dpp %0, %0, %0 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf\n"
-        "s_nop 4\n"
-        "v_max_f32_dpp %0, %0, %0 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf"
-        : "+v"(value), "=v"(temp) :: "memory"
-    );
-    return value;
-}
-
-// 8-thread MAX reduction
-__device__ __forceinline__ __attribute__((always_inline)) float amd_reduce_max_8_mega(float value) {
-    float temp;
-    asm volatile(
-        "s_nop 4\n"
-        "v_max_f32_dpp %0, %0, %0 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf\n"
-        "s_nop 1\n"
-        "v_max_f32_dpp %0, %0, %0 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf\n"
-        "v_mov_b32 %1, %0\n"
-        "s_nop 1\n"
-        "v_mov_b32_dpp %1, %0 row_shl:4 row_mask:0xf bank_mask:0x5\n"
-        "v_mov_b32_dpp %1, %0 row_shr:4 row_mask:0xf bank_mask:0xa\n"
-        "v_max_f32 %0, %0, %1"
-        : "+v"(value), "=v"(temp) :: "memory"
-    );
-    return value;
-}
-
-// 16-thread MAX reduction
-__device__ __forceinline__ __attribute__((always_inline)) float amd_reduce_max_16_mega(float value) {
-    float temp;
-    asm volatile(
-        "s_nop 4\n"
-        "v_max_f32_dpp %0, %0, %0 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf\n"
-        "s_nop 1\n"
-        "v_max_f32_dpp %0, %0, %0 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf\n"
-        "v_mov_b32 %1, %0\n"
-        "s_nop 1\n"
-        "v_mov_b32_dpp %1, %0 row_shl:4 row_mask:0xf bank_mask:0x5\n"
-        "v_mov_b32_dpp %1, %0 row_shr:4 row_mask:0xf bank_mask:0xa\n"
-        "v_max_f32 %0, %0, %1\n"
-        "s_nop 1\n"
-        "v_max_f32_dpp %0, %0, %0 row_ror:8 row_mask:0xf bank_mask:0xf"
-        : "+v"(value), "=v"(temp) :: "memory"
-    );
-    return value;
-}
-
-// 32-thread MAX reduction
-__device__ __forceinline__ __attribute__((always_inline)) float amd_reduce_max_32_mega(float value) {
-    float temp;
-    asm volatile(
-        "s_nop 4\n"
-        "v_max_f32_dpp %0, %0, %0 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf\n"
-        "s_nop 1\n"
-        "v_max_f32_dpp %0, %0, %0 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf\n"
-        "v_mov_b32 %1, %0\n"
-        "s_nop 1\n"
-        "v_mov_b32_dpp %1, %0 row_shl:4 row_mask:0xf bank_mask:0x5\n"
-        "v_mov_b32_dpp %1, %0 row_shr:4 row_mask:0xf bank_mask:0xa\n"
-        "v_max_f32 %0, %0, %1\n"
-        "s_nop 1\n"
-        "v_max_f32_dpp %0, %0, %0 row_ror:8 row_mask:0xf bank_mask:0xf\n"
-        "ds_swizzle_b32 %1, %0 offset:swizzle(SWAP,16)\n"
-        "s_waitcnt lgkmcnt(0)\n"
-        "v_max_f32 %0, %0, %1"
-        : "+v"(value), "=v"(temp) :: "memory"
-    );
-    return value;
-}
-
-// -------------------------------------------------------------------------------------------------
-// 4. GENERIC REDUCTION TEMPLATES (dispatch to mega-kernels for floats)
-// -------------------------------------------------------------------------------------------------
-
-template <int logical_width, typename T>
-__device__ __forceinline__ __attribute__((always_inline)) T amd_reduce_sum(T value) {
-    if constexpr (sizeof(T) == 4 && logical_width <= 64) {
-        // Optimized DPP-based reductions for 2-64 threads
-
-        if constexpr (logical_width <= 32) {
-            // Use mega-kernel for float (9.5% faster - entire chain in one asm block)
-            if constexpr (std::is_same_v<T, float>) {
-                if constexpr (logical_width == 4) {
-                    return amd_reduce_sum_4_mega(value);
-                } else if constexpr (logical_width == 8) {
-                    return amd_reduce_sum_8_mega(value);
-                } else if constexpr (logical_width == 16) {
-                    return amd_reduce_sum_16_mega(value);
-                } else if constexpr (logical_width == 32) {
-                    return amd_reduce_sum_32_mega(value);
-                } else {
-                    // Fall back to individual fused operations for width 2
-                    if constexpr (logical_width >= 2)  value = dpp_quad_perm_xor1_add_f32(value);
-                }
-            } else {
-                // Generic path for non-float types
-                if constexpr (logical_width >= 2)  value += dpp_quad_perm_xor1(value);
-                if constexpr (logical_width >= 4)  value += dpp_quad_perm_xor2(value);
-                if constexpr (logical_width >= 8)  value += dpp_dual_bank_xor4(value);
-                if constexpr (logical_width >= 16) value += dpp_row_ror8(value);
-                if constexpr (logical_width >= 32) value += dpp_ds_swizzle_xor16(value);
-            }
-        } else {
-            // 64-thread reduction: XOR 32 first (shfl), then unified DPP sequence
-            value += __shfl_xor(value, 32, 64);
-
-            // Use fused operations for float
-            if constexpr (std::is_same_v<T, float>) {
-                value += dpp_ds_swizzle_xor16(value);
-                value = dpp_row_ror8_add_f32(value);
-                value += dpp_dual_bank_xor4(value);
-                value = dpp_quad_perm_xor2_add_f32(value);
-                value = dpp_quad_perm_xor1_add_f32(value);
-            } else {
-                // Generic path
-                value += dpp_ds_swizzle_xor16(value);
-                value += dpp_row_ror8(value);
-                value += dpp_dual_bank_xor4(value);
-                value += dpp_quad_perm_xor2(value);
-                value += dpp_quad_perm_xor1(value);
-            }
-        }
-    } else {
-        // Fallback for logical_width > 64 or other types
-#pragma unroll
-        for (int offset = logical_width/2; offset > 0; offset >>= 1) {
-            value += __shfl_xor_sync(0xffffffff, value, offset, logical_width);
-        }
-    }
-    return value;
-}
-
-template <int logical_width, typename T>
-__device__ __forceinline__ __attribute__((always_inline)) T amd_reduce_max(T value) {
-    if constexpr (sizeof(T) == 4 && logical_width <= 64) {
-        if constexpr (logical_width <= 32) {
-            // Use mega-kernel (entire chain inline) for common widths
-            if constexpr (std::is_same_v<T, float>) {
-                if constexpr (logical_width == 4) {
-                    return amd_reduce_max_4_mega(value);
-                } else if constexpr (logical_width == 8) {
-                    return amd_reduce_max_8_mega(value);
-                } else if constexpr (logical_width == 16) {
-                    return amd_reduce_max_16_mega(value);
-                } else if constexpr (logical_width == 32) {
-                    return amd_reduce_max_32_mega(value);
-                } else {
-                    // Fall back to individual fused operations for width 2
-                    if constexpr (logical_width >= 2)  value = dpp_quad_perm_xor1_max_f32(value);
-                }
-            } else {
-                // Generic path for non-float types
-                T shuffled;
-                if constexpr (logical_width >= 2) {
-                    shuffled = dpp_quad_perm_xor1(value);
-                    value = (value > shuffled) ? value : shuffled;
-                }
-                if constexpr (logical_width >= 4) {
-                    shuffled = dpp_quad_perm_xor2(value);
-                    value = (value > shuffled) ? value : shuffled;
-                }
-                if constexpr (logical_width >= 8) {
-                    shuffled = dpp_dual_bank_xor4(value);
-                    value = (value > shuffled) ? value : shuffled;
-                }
-                if constexpr (logical_width >= 16) {
-                    shuffled = dpp_row_ror8(value);
-                    value = (value > shuffled) ? value : shuffled;
-                }
-                if constexpr (logical_width >= 32) {
-                    shuffled = dpp_ds_swizzle_xor16(value);
-                    value = (value > shuffled) ? value : shuffled;
-                }
-            }
-        } else {
-            // 64-thread reduction
-            T shuffled = __shfl_xor(value, 32, 64);
-            value = (value > shuffled) ? value : shuffled;
-
-            // Use fused operations for float
-            if constexpr (std::is_same_v<T, float>) {
-                shuffled = dpp_ds_swizzle_xor16(value);
-                value = (value > shuffled) ? value : shuffled;
-                value = dpp_row_ror8_max_f32(value);
-                shuffled = dpp_dual_bank_xor4(value);
-                value = (value > shuffled) ? value : shuffled;
-                value = dpp_quad_perm_xor2_max_f32(value);
-                value = dpp_quad_perm_xor1_max_f32(value);
-            } else {
-                // Generic path
-                shuffled = dpp_ds_swizzle_xor16(value);
-                value = (value > shuffled) ? value : shuffled;
-                shuffled = dpp_row_ror8(value);
-                value = (value > shuffled) ? value : shuffled;
-                shuffled = dpp_dual_bank_xor4(value);
-                value = (value > shuffled) ? value : shuffled;
-                shuffled = dpp_quad_perm_xor2(value);
-                value = (value > shuffled) ? value : shuffled;
-                shuffled = dpp_quad_perm_xor1(value);
-                value = (value > shuffled) ? value : shuffled;
-            }
-        }
-    } else {
-#pragma unroll
-        for (int offset = logical_width/2; offset > 0; offset >>= 1) {
-            T shuffled = __shfl_xor_sync(0xffffffff, value, offset, logical_width);
-            value = (value > shuffled) ? value : shuffled;
-        }
-    }
-    return value;
-}
-
-// -------------------------------------------------------------------------------------------------
-// 5. SPECIALIZED REDUCTION IMPLEMENTATIONS (deprecated - use generic templates above)
-// -------------------------------------------------------------------------------------------------
-
-// SUM reductions using DPP
-template<int width, typename T>
-__device__ __forceinline__ T amd_reduce_sum_dpp(T value) {
-    static_assert(width >= 2 && width <= 64, "Width must be 2-64");
-
-    if constexpr (width >= 2)  { value = value + dpp_quad_perm_xor1(value); }
-    if constexpr (width >= 4)  { value = value + dpp_quad_perm_xor2(value); }
-    if constexpr (width >= 8)  { value = value + dpp_dual_bank_xor4(value); }
-    if constexpr (width >= 16) { value = value + dpp_row_ror8(value); }
-    if constexpr (width >= 32) { value = value + dpp_ds_swizzle_xor16(value); }
-    if constexpr (width == 64) { value = value + __shfl_xor_sync(0xffffffff, value, 32, 64); }
-
-    return value;
-}
-
-// Optimized float SUM using fused operations
-template<int width>
-__device__ __forceinline__ float amd_reduce_sum_float(float value) {
-    static_assert(width >= 2 && width <= 64, "Width must be 2-64");
-
-    // Use mega-kernels for common widths (9.5% faster than individual operations)
-    if constexpr (width == 4) {
-        return amd_reduce_sum_4_mega(value);
-    } else if constexpr (width == 8) {
-        return amd_reduce_sum_8_mega(value);
-    } else if constexpr (width == 16) {
-        return amd_reduce_sum_16_mega(value);
-    } else if constexpr (width == 32) {
-        return amd_reduce_sum_32_mega(value);
-    } else if constexpr (width == 64) {
-        // 64-thread reduction: XOR 32 first (shfl), then DPP sequence
-        // Order matters for dependency chains on GFX906!
-        value = value + __shfl_xor(value, 32, 64);
-        value = value + dpp_ds_swizzle_xor16(value);
-        value = dpp_row_ror8_add_f32(value);
-        value = value + dpp_dual_bank_xor4(value);
-        value = dpp_quad_perm_xor2_add_f32(value);
-        value = dpp_quad_perm_xor1_add_f32(value);
-        return value;
-    }
-
-    // Fallback for width == 2
-    if constexpr (width >= 2)  { value = dpp_quad_perm_xor1_add_f32(value); }
-
-    return value;
-}
-
-// float2 SUM - parallel reductions on both components
-template<int width>
-__device__ __forceinline__ float2 amd_reduce_sum_float2(float2 a) {
-    a.x = amd_reduce_sum_float<width>(a.x);
-    a.y = amd_reduce_sum_float<width>(a.y);
-    return a;
-}
-
-// half/half2 SUM using int proxy for DPP compatibility
-template<int width>
-__device__ __forceinline__ half amd_reduce_sum_half(half x) {
-    int x_int = *reinterpret_cast<short*>(&x);
-    x_int = amd_reduce_sum_dpp<width>(x_int);
-    return *reinterpret_cast<half*>(&x_int);
-}
-
-template<int width>
-__device__ __forceinline__ half2 amd_reduce_sum_half2(half2 a) {
-    int a_int = *reinterpret_cast<int*>(&a);
-    a_int = amd_reduce_sum_dpp<width>(a_int);
-    return *reinterpret_cast<half2*>(&a_int);
-}
-
-// MAX reductions using DPP
-template<int width, typename T>
-__device__ __forceinline__ T amd_reduce_max_dpp(T value) {
-    static_assert(width >= 2 && width <= 64, "Width must be 2-64");
-
-    if constexpr (width >= 2)  { value = fmaxf(value, dpp_quad_perm_xor1(value)); }
-    if constexpr (width >= 4)  { value = fmaxf(value, dpp_quad_perm_xor2(value)); }
-    if constexpr (width >= 8)  { value = fmaxf(value, dpp_dual_bank_xor4(value)); }
-    if constexpr (width >= 16) { value = fmaxf(value, dpp_row_ror8(value)); }
-    if constexpr (width >= 32) { value = fmaxf(value, dpp_ds_swizzle_xor16(value)); }
-    if constexpr (width == 64) { value = fmaxf(value, __shfl_xor_sync(0xffffffff, value, 32, 64)); }
-
-    return value;
-}
-
-// Optimized float MAX using fused operations
-template<int width>
-__device__ __forceinline__ float amd_reduce_max_float(float value) {
-    static_assert(width >= 2 && width <= 64, "Width must be 2-64");
-
-    // Use mega-kernels for common widths (9.5% faster than individual operations)
-    if constexpr (width == 4) {
-        return amd_reduce_max_4_mega(value);
-    } else if constexpr (width == 8) {
-        return amd_reduce_max_8_mega(value);
-    } else if constexpr (width == 16) {
-        return amd_reduce_max_16_mega(value);
-    } else if constexpr (width == 32) {
-        return amd_reduce_max_32_mega(value);
-    } else if constexpr (width == 64) {
-        // 64-thread reduction: XOR 32 first (shfl), then DPP sequence
-        // Order matters for dependency chains on GFX906!
-        float shuffled = __shfl_xor(value, 32, 64);
-        value = fmaxf(value, shuffled);
-        shuffled = dpp_ds_swizzle_xor16(value);
-        value = fmaxf(value, shuffled);
-        value = dpp_row_ror8_max_f32(value);
-        shuffled = dpp_dual_bank_xor4(value);
-        value = fmaxf(value, shuffled);
-        value = dpp_quad_perm_xor2_max_f32(value);
-        value = dpp_quad_perm_xor1_max_f32(value);
-        return value;
-    }
-
-    // Fallback for width == 2
-    if constexpr (width >= 2)  { value = dpp_quad_perm_xor1_max_f32(value); }
-
-    return value;
-}
-
-// half MAX using __hmax
-template<int width>
-__device__ __forceinline__ half amd_reduce_max_half(half x) {
-    if constexpr (width >= 2)  { x = __hmax(x, dpp_quad_perm_xor1(x)); }
-    if constexpr (width >= 4)  { x = __hmax(x, dpp_quad_perm_xor2(x)); }
-    if constexpr (width >= 8)  { x = __hmax(x, dpp_dual_bank_xor4(x)); }
-    if constexpr (width >= 16) { x = __hmax(x, dpp_row_ror8(x)); }
-    if constexpr (width >= 32) { x = __hmax(x, dpp_ds_swizzle_xor16(x)); }
-    if constexpr (width == 64) { x = __hmax(x, __shfl_xor_sync(0xffffffff, x, 32, 64)); }
-    return x;
-}
-
-// half2 MAX - component-wise maximum
-template<int width>
-__device__ __forceinline__ half2 amd_reduce_max_half2(half2 x) {
-    if constexpr (width >= 2) {
-        half2 other = dpp_quad_perm_xor1(x);
-        x = half2(__hmax(x.x, other.x), __hmax(x.y, other.y));
-    }
-    if constexpr (width >= 4) {
-        half2 other = dpp_quad_perm_xor2(x);
-        x = half2(__hmax(x.x, other.x), __hmax(x.y, other.y));
-    }
-    if constexpr (width >= 8) {
-        half2 other = dpp_dual_bank_xor4(x);
-        x = half2(__hmax(x.x, other.x), __hmax(x.y, other.y));
-    }
-    if constexpr (width >= 16) {
-        half2 other = dpp_row_ror8(x);
-        x = half2(__hmax(x.x, other.x), __hmax(x.y, other.y));
-    }
-    if constexpr (width >= 32) {
-        half2 other = dpp_ds_swizzle_xor16(x);
-        x = half2(__hmax(x.x, other.x), __hmax(x.y, other.y));
-    }
-    if constexpr (width == 64) {
-        half2 other = __shfl_xor_sync(0xffffffff, x, 32, 64);
-        x = half2(__hmax(x.x, other.x), __hmax(x.y, other.y));
-    }
-    return x;
-}
-
 #endif // GGML_USE_HIP
 
-// ================================================================================================
-// END AMD GFX906/GCN DPP OPTIMIZATIONS
-// ================================================================================================
+// ============================================================================
+// Unified shuffle XOR operation - works on both NVIDIA and AMD
+// ============================================================================
+template<int width = WARP_SIZE, typename T>
+static __device__ __forceinline__ T ggml_cuda_shfl_xor_sync(T x, int offset) {
+#if defined(GGML_USE_HIP)
+    switch (~offset) {
+        case ~1:  return hip_dpp_xor1(x);
+        case ~2:  return hip_dpp_xor2(x);
+        case ~4:  return hip_dpp_xor4(x);
+        case ~8:  return hip_dpp_xor8(x);
+        case ~16: return hip_dpp_xor16(x);
+        default:  return __shfl_xor(x, offset, width);
+    }
+#else
+    return __shfl_xor_sync(0xffffffff, x, offset, width);
+#endif
+}
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ int warp_reduce_sum(int x) {
-#if defined(GGML_USE_HIP)
-    return amd_reduce_sum_dpp<width>(x);
-#elif __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
+#if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
     return __reduce_add_sync(0xffffffff, x);
 #else
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        x += __shfl_xor_sync(0xffffffff, x, offset, width);
+        x += ggml_cuda_shfl_xor_sync<width>(x, offset);
     }
     return x;
 #endif
@@ -1000,11 +571,11 @@ static __device__ __forceinline__ int warp_reduce_sum(int x) {
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_sum(float x) {
 #if defined(GGML_USE_HIP)
-    return amd_reduce_sum<width>(x);
+    return warp_reduce_amd_f32<width, AddOp>(x);  // Use fused DPP instructions
 #else
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        x += __shfl_xor_sync(0xffffffff, x, offset, width);
+        x += ggml_cuda_shfl_xor_sync<width>(x, offset);
     }
     return x;
 #endif
@@ -1012,30 +583,22 @@ static __device__ __forceinline__ float warp_reduce_sum(float x) {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float2 warp_reduce_sum(float2 a) {
-#if defined(GGML_USE_HIP)
-    return amd_reduce_sum_float2<width>(a);
-#else
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        a.x += __shfl_xor_sync(0xffffffff, a.x, offset, width);
-        a.y += __shfl_xor_sync(0xffffffff, a.y, offset, width);
+        a.x += ggml_cuda_shfl_xor_sync<width>(a.x, offset);
+        a.y += ggml_cuda_shfl_xor_sync<width>(a.y, offset);
     }
     return a;
-#endif
 }
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ half2 warp_reduce_sum(half2 a) {
 #ifdef FP16_AVAILABLE
-#if defined(GGML_USE_HIP)
-    return amd_reduce_sum_half2<width>(a);
-#else
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        a = __hadd2(a, __shfl_xor_sync(0xffffffff, a, offset, width));
+        a = __hadd2(a, ggml_cuda_shfl_xor_sync<width>(a, offset));
     }
     return a;
-#endif
 #else
     NO_DEVICE_CODE;
     return a;
@@ -1049,7 +612,7 @@ static __device__ __forceinline__ int warp_reduce_all(int x) {
     } else {
 #pragma unroll
         for (int offset = width/2; offset > 0; offset >>= 1) {
-            x = __shfl_xor_sync(0xffffffff, x, offset, width) && x;
+            x = ggml_cuda_shfl_xor_sync<width>(x, offset) && x;
         }
         return x;
     }
@@ -1062,7 +625,7 @@ static __device__ __forceinline__ int warp_reduce_any(int x) {
     } else {
 #pragma unroll
         for (int offset = width/2; offset > 0; offset >>= 1) {
-            x = __shfl_xor_sync(0xffffffff, x, offset, width) || x;
+            x = ggml_cuda_shfl_xor_sync<width>(x, offset) || x;
         }
         return x;
     }
@@ -1071,11 +634,11 @@ static __device__ __forceinline__ int warp_reduce_any(int x) {
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_max(float x) {
 #if defined(GGML_USE_HIP)
-    return amd_reduce_max<width>(x);
+    return warp_reduce_amd_f32<width, MaxOp>(x);  // Use fused DPP instructions
 #else
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, offset, width));
+        x = fmaxf(x, ggml_cuda_shfl_xor_sync<width>(x, offset));
     }
     return x;
 #endif
@@ -1112,12 +675,10 @@ static __device__ __forceinline__ half2 ggml_cuda_hmax2(const half2 a, const hal
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ half2 warp_reduce_max(half2 x) {
-#if defined(GGML_USE_HIP)
-    return amd_reduce_max_half2<width>(x);
-#elif __CUDA_ARCH__ >= GGML_CUDA_CC_PASCAL
+#if defined(GGML_USE_HIP) || __CUDA_ARCH__ >= GGML_CUDA_CC_PASCAL
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        x = ggml_cuda_hmax2(x, __shfl_xor_sync(0xffffffff, x, offset, width));
+        x = ggml_cuda_hmax2(x, ggml_cuda_shfl_xor_sync<width>(x, offset));
     }
     return x;
 #else

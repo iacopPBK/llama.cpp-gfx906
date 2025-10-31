@@ -86,21 +86,19 @@ static __global__ void quantize_mmq_q8_1(
     amax = fmaxf(amax, fabsf(xi.z));
     amax = fmaxf(amax, fabsf(xi.w));
 
-    // Exchange max. abs. value between vals_per_scale/4 threads.
-#pragma unroll
-    for (int offset = vals_per_scale/8; offset > 0; offset >>= 1) {
-        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset, WARP_SIZE));
-    }
+    // Exchange max. abs. value using fused DPP instructions
+    // Original loop: for (offset = vals_per_scale/8; offset > 0; offset >>= 1)
+    // Starting at offset K reduces across 2*K threads, so width = 2*(vals_per_scale/8) = vals_per_scale/4
+    amax = warp_reduce_max<vals_per_scale/4>(amax);
 
     float sum;
     if (ds_layout != MMQ_Q8_1_DS_LAYOUT_D4) {
         sum = xi.x + xi.y + xi.z + xi.w;
 
-        // Calculate sums across vals_per_sum/4 threads.
-#pragma unroll
-        for (int offset = vals_per_sum/8; offset > 0; offset >>= 1) {
-            sum += __shfl_xor_sync(0xFFFFFFFF, sum, offset, WARP_SIZE);
-        }
+        // Calculate sums using fused DPP instructions
+        // Original loop: for (offset = vals_per_sum/8; offset > 0; offset >>= 1)
+        // Starting at offset K reduces across 2*K threads, so width = 2*(vals_per_sum/8) = vals_per_sum/4
+        sum = warp_reduce_sum<vals_per_sum/4>(sum);
     }
 
     const float d_inv = 127.0f / amax;
