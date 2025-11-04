@@ -37,7 +37,7 @@ This fork implements **low-level AMD GCN ISA optimizations** for llama.cpp infer
 
 ## Key Optimizations
 
-### 1. Fused DPP Instructions ⭐ (Main Optimization)
+### 1. Fused DPP Instructions (Main Optimization)
 
 Replaced separate shuffle + arithmetic operations with single fused DPP+ALU instructions:
 
