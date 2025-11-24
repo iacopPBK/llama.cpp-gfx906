@@ -56,7 +56,18 @@ file(GLOB   GGML_HEADERS_ROCM "../ggml-cuda/*.cuh")
 list(APPEND GGML_HEADERS_ROCM "../../include/ggml-cuda.h")
 
 file(GLOB   GGML_SOURCES_ROCM "../ggml-cuda/*.cu")
+
+# GFX906-specific source files (AMD MI50/MI60 optimizations)
+file(GLOB SRCS "../ggml-cuda/gfx906/*.cu")
+message(STATUS "GFX906 .cu files found: ${SRCS}")
+list(APPEND GGML_SOURCES_ROCM ${SRCS})
+file(GLOB SRCS "../ggml-cuda/gfx906/template-instances/*.cu")
+message(STATUS "GFX906 template instances found: ${SRCS}")
+list(APPEND GGML_SOURCES_ROCM ${SRCS})
+
 file(GLOB   SRCS "../ggml-cuda/template-instances/fattn-tile*.cu")
+# Exclude Q8 instances if they're in root (moved to gfx906/)
+list(FILTER SRCS EXCLUDE REGEX ".*fattn-tile-q8.*")
 list(APPEND GGML_SOURCES_ROCM ${SRCS})
 file(GLOB   SRCS "../ggml-cuda/template-instances/fattn-mma*.cu")
 list(APPEND GGML_SOURCES_ROCM ${SRCS})

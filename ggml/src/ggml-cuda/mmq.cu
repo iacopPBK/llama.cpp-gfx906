@@ -3,6 +3,16 @@
 #include "mmid.cuh"
 
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
+    static bool first_call = true;
+    if (first_call) {
+#ifdef GGML_USE_HIP
+        fprintf(stderr, "MMQ kernel config: ITER_K=%d, NWARPS=%d (GFX906 optimizations)\n", MMQ_ITER_K, MMQ_NWARPS);
+#else
+        fprintf(stderr, "MMQ kernel config: ITER_K=%d, NWARPS=%d (default)\n", MMQ_ITER_K, MMQ_NWARPS);
+#endif
+        first_call = false;
+    }
+
     switch (args.type_x) {
         case GGML_TYPE_Q4_0:
             mul_mat_q_case<GGML_TYPE_Q4_0>(ctx, args, stream);

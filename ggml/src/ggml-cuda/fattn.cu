@@ -6,6 +6,11 @@
 #include "fattn-wmma-f16.cuh"
 #include "fattn.cuh"
 
+// GFX906 Q8 Flash Attention kernel
+#ifdef GGML_USE_HIP
+    #include "gfx906/gfx906-fattn-q8.cuh"
+#endif
+
 template <int DKQ, int DV, int ncols2>
 static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
@@ -194,6 +199,9 @@ enum best_fattn_kernel {
     BEST_FATTN_KERNEL_VEC      = 100,
     BEST_FATTN_KERNEL_WMMA_F16 = 300,
     BEST_FATTN_KERNEL_MMA_F16  = 400,
+#ifdef GGML_USE_HIP
+    BEST_FATTN_KERNEL_TILE_Q8  = 250,
+#endif
 };
 
 static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const ggml_tensor * dst) {
@@ -323,17 +331,70 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
             }
         }
     }
+
+#ifdef GGML_USE_HIP
+    // Use Q8-optimized tile kernel if KV cache is Q8_0:
+    // Can be disabled with GGML_HIP_FATTN_USE_TILE_DOT4=0
+    if (K->type == GGML_TYPE_Q8_0 || V->type == GGML_TYPE_Q8_0) {
+        // Q8 kernel only supports head sizes that are multiples of 32
+        // Currently unsupported: 40, 80, 112 (see fattn-tile-q8.cu)
+        const bool q8_head_size_supported = (K->ne[0] % 32 == 0) &&
+                                            (K->ne[0] != 40) &&
+                                            (K->ne[0] != 80) &&
+                                            (K->ne[0] != 112);
+
+        if (q8_head_size_supported) {
+            const char * env_use_dot4 = getenv("GGML_HIP_FATTN_USE_TILE_DOT4");
+            if (env_use_dot4 == nullptr || strcmp(env_use_dot4, "0") != 0) {
+                return BEST_FATTN_KERNEL_TILE_Q8;
+            }
+        }
+        // Fall through to return TILE if disabled or unsupported head size
+    }
+#endif // GGML_USE_HIP
+
     return BEST_FATTN_KERNEL_TILE;
 }
 
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_set_device(ctx.device);
-    switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
+
+    static bool first_call = true;
+    best_fattn_kernel kernel = ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst);
+
+    if (first_call) {
+        const char * kernel_name = "UNKNOWN";
+        switch (kernel) {
+            case BEST_FATTN_KERNEL_TILE: kernel_name = "TILE"; break;
+#ifdef GGML_USE_HIP
+            case BEST_FATTN_KERNEL_TILE_Q8: kernel_name = "TILE_Q8 (dot4)"; break;
+#endif
+            case BEST_FATTN_KERNEL_VEC: kernel_name = "VEC"; break;
+            case BEST_FATTN_KERNEL_WMMA_F16: kernel_name = "WMMA_F16"; break;
+            case BEST_FATTN_KERNEL_MMA_F16: kernel_name = "MMA_F16"; break;
+            default: break;
+        }
+        fprintf(stderr, "Flash Attention kernel: %s\n", kernel_name);
+
+        const char * env_use_dot4 = getenv("GGML_HIP_FATTN_USE_TILE_DOT4");
+        if (env_use_dot4 != nullptr) {
+            fprintf(stderr, "GGML_HIP_FATTN_USE_TILE_DOT4=%s\n", env_use_dot4);
+        }
+
+        first_call = false;
+    }
+
+    switch (kernel) {
         case BEST_FATTN_KERNEL_NONE:
             GGML_ABORT("fatal error");
         case BEST_FATTN_KERNEL_TILE:
             ggml_cuda_flash_attn_ext_tile(ctx, dst);
             break;
+#ifdef GGML_USE_HIP
+        case BEST_FATTN_KERNEL_TILE_Q8:
+            ggml_cuda_flash_attn_ext_tile_q8(ctx, dst);
+            break;
+#endif // GGML_USE_HIP
         case BEST_FATTN_KERNEL_VEC:
             ggml_cuda_flash_attn_ext_vec(ctx, dst);
             break;
