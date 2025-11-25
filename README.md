@@ -39,6 +39,13 @@ gfx906/              New directory with MI50/MI60-specific kernel implementation
 
 ## Quick Start
 
+Optional but sometimes required, set your paths for rocm and device libs if they are not in /opt/rocm/
+
+```bash
+export ROCM_PATH=/opt/rocm-7.1.0 #optional
+export HIP_DEVICE_LIB_PATH=/opt/rocm-7.1.0/amdgcn/bitcode #optional
+```
+
 ```bash
 git clone https://github.com/iacopPBK/llama.cpp-gfx906.git
 cd llama.cpp-gfx906
