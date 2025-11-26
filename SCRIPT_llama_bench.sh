@@ -54,7 +54,7 @@ usage() {
     echo "  $0 custom -p 1024 -n 256    # Custom benchmark"
     echo ""
     echo "Model path: $MODEL_PATH"
-    echo "ROCm: NIGHTLY runtime"
+
 }
 
 # Parse command line arguments
@@ -118,7 +118,6 @@ if [ ! -f "./build/bin/llama-bench" ]; then
 fi
 
 # Run the benchmark
-echo "=== Starting llama-bench with GFX906 Flash Attention + ROCm NIGHTLY ==="
 echo "Command: ./build/bin/llama-bench ${BENCH_PARAMS[*]} $TEST_PARAMS $@"
 echo ""
 echo "Output will be saved to: $LOG_FILE"
