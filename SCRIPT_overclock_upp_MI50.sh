@@ -3,8 +3,6 @@
 MI50_POWER=225
 MI50_SCLK=2000
 MI50_MCLK=1125
-MI50_TDC_LIMIT_GFX=150
-MI50_MAX_VOLTAGE_GFX=4000
 MI50_CARD=1
 
 DEVICE="/sys/class/drm/card${MI50_CARD}/device"
@@ -21,16 +19,15 @@ if [ ! -f "$UPP_PYTHON" ]; then
 fi
 
 echo "============================================"
-echo "AMD MI50 Overclock & Undervolt using UPP"
+echo "AMD MI50 Overclock using UPP"
 echo "============================================"
 echo "Target Settings:"
 echo "  Core Clock (Max): ${MI50_SCLK}MHz"
 echo "  Memory Clock (Max): ${MI50_MCLK}MHz"
 echo "  Power Limit: ${MI50_POWER}W"
-echo "  TDC Limit GFX: ${MI50_TDC_LIMIT_GFX}A"
-echo "  Max Voltage GFX: ${MI50_MAX_VOLTAGE_GFX}mV"
 echo "============================================"
 echo ""
+
 if [ ! -w "${DEVICE}/pp_table" ]; then
     echo "⚠ Warning: ${DEVICE}/pp_table is not writable"
     echo "You may need to add amdgpu.ppfeaturemask=0xffffffff to kernel parameters"
@@ -40,27 +37,6 @@ fi
 
 echo "Applying overclock and power settings..."
 
-# Apply voltage limit - critical for stability
-# COMMENTED OUT: Uncomment to enable undervolting
-#sudo "$UPP_PYTHON" -m upp.upp -p ${DEVICE}/pp_table set --write \
-#    smcPPTable/MaxVoltageGfx=$MI50_MAX_VOLTAGE_GFX
-#
-#if [ $? -ne 0 ]; then
-#    echo "✗ Failed to set max voltage!"
-#    exit 1
-#fi
-
-# Apply TDC limit (current limit) - critical for stability and performance
-# COMMENTED OUT: Uncomment to enable TDC limiting for ~10% performance boost
-#sudo "$UPP_PYTHON" -m upp.upp -p ${DEVICE}/pp_table set --write \
-#    smcPPTable/TdcLimitGfx=$MI50_TDC_LIMIT_GFX
-#
-#if [ $? -ne 0 ]; then
-#    echo "✗ Failed to set TDC limit!"
-#    exit 1
-#fi
-
-# Apply power limits (optional - not critical for performance)
 sudo "$UPP_PYTHON" -m upp.upp -p ${DEVICE}/pp_table set --write \
     smcPPTable/SocketPowerLimitAc0=$MI50_POWER \
     smcPPTable/SocketPowerLimitDc=$MI50_POWER
@@ -69,7 +45,6 @@ if [ $? -ne 0 ]; then
     echo "⚠ Warning: Failed to set socket power limits (may not be critical)"
 fi
 
-# Apply clock frequencies
 sudo "$UPP_PYTHON" -m upp.upp -p ${DEVICE}/pp_table set --write \
     smcPPTable/FreqTableGfx/8=$MI50_SCLK \
     smcPPTable/FreqTableUclk/2=$MI50_MCLK \
@@ -86,7 +61,4 @@ echo "Applied settings:"
 echo "  - Target Core Clock: ${MI50_SCLK}MHz"
 echo "  - Target Memory Clock: ${MI50_MCLK}MHz"
 echo "  - Power Limit: ${MI50_POWER}W"
-echo ""
-echo "Note: Undervolt settings are commented out."
-echo "To enable ~10% performance boost, uncomment the voltage and TDC limit sections in the script."
 echo ""
