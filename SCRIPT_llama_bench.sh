@@ -1,19 +1,3 @@
-#!/bin/bash
-#
-# Run llama-bench with AMD MI50 ROCm NIGHTLY support and GFX906 optimizations
-# Uses ROCm nightly runtime libraries for testing latest improvements
-#
-
-# Load ROCm Nightly environment
-if [[ -f "$HOME/rocm-nightly-env.sh" ]]; then
-    source "$HOME/rocm-nightly-env.sh"
-    echo "✓ ROCm Nightly Runtime loaded"
-    echo "  Version: $(hipcc --version 2>/dev/null | grep 'HIP version' | head -1 || echo 'Unknown')"
-    echo "  Path: $ROCM_PATH"
-else
-    echo "WARNING: ROCm nightly not found, using system ROCm"
-fi
-
 # Set ROCm environment variables for MI50 ONLY (optimal configuration)
 export HSA_OVERRIDE_GFX_VERSION=9.0.6
 export HIP_VISIBLE_DEVICES=0           # ONLY MI50 (Device 0)
@@ -27,8 +11,7 @@ LOG_FILE="bench_results.md"
 
 # Path to your model file - update this to your actual model path
 MODEL_PATH="/home/iacopo/Downloads/Qwen3-4B-Instruct-2507-Q4_0.gguf"
-MODEL_PATH="/home/iacopo/Downloads/Qwen3-VL-30B-A3B-Instruct-Q4_1.gguf"
-#MODEL_PATH="/home/iacopo/Downloads/gpt-oss-20b-Q4_1.gguf"
+
 # Default benchmark parameters (matching server configuration)
 BENCH_PARAMS=(
     -m "$MODEL_PATH"
@@ -74,13 +57,6 @@ usage() {
     echo "ROCm: NIGHTLY runtime"
 }
 
-# Check if model file exists
-if [ ! -f "$MODEL_PATH" ]; then
-    echo "Error: Model file not found at: $MODEL_PATH"
-    echo "Please update MODEL_PATH in this script or ensure the model exists."
-    exit 1
-fi
-
 # Parse command line arguments
 TEST_TYPE="${1:-standard}"
 shift  # Remove first argument, rest will be passed to llama-bench
@@ -124,10 +100,6 @@ esac
 
 # Display system info
 echo "Model: $(basename "$MODEL_PATH")"
-echo "GPU: MI50 (gfx906) - Device 0 only"
-echo "Flash Attention: ENABLED (GFX906 optimized)"
-echo "KV Cache: q8_0 quantized"
-echo "ROCm: NIGHTLY ($(hipcc --version 2>/dev/null | grep 'HIP version' | head -1 || echo 'Unknown'))"
 echo ""
 
 # Display GPU info
@@ -151,27 +123,6 @@ echo "Command: ./build/bin/llama-bench ${BENCH_PARAMS[*]} $TEST_PARAMS $@"
 echo ""
 echo "Output will be saved to: $LOG_FILE"
 echo ""
-
-# Initialize the log file with markdown header
-{
-    echo "# Llama Bench Results - ROCm NIGHTLY"
-    echo ""
-    echo "## Test Configuration"
-    echo "- Date: $(date)"
-    echo "- Model: $(basename "$MODEL_PATH")"
-    echo "- GPU: MI50 (gfx906)"
-    echo "- Flash Attention: ENABLED"
-    echo "- KV Cache: q8_0"
-    echo "- ROCm: NIGHTLY $(hipcc --version 2>/dev/null | grep 'HIP version' | head -1 || echo 'Unknown')"
-    echo ""
-    echo "## Command"
-    echo "\`\`\`"
-    echo "./build/bin/llama-bench ${BENCH_PARAMS[*]} $TEST_PARAMS $@"
-    echo "\`\`\`"
-    echo ""
-    echo "## Full Output"
-    echo "\`\`\`"
-} > "$LOG_FILE"
 
 # Run benchmark and capture ALL output to both terminal and log file
 ./build/bin/llama-bench "${BENCH_PARAMS[@]}" $TEST_PARAMS "$@" 2>&1 | tee -a "$LOG_FILE"
@@ -203,10 +154,5 @@ grep -i "flash_attn_tile_q8\|ncols=64\|v_dot4" "$LOG_FILE" | head -20 || echo "N
 echo ""
 echo "=== Benchmark Complete ==="
 echo "Full output saved to: $LOG_FILE"
-if [ $BENCH_EXIT_CODE -eq 0 ]; then
-    echo "✓ Benchmark completed successfully with ROCm NIGHTLY"
-else
-    echo "✗ Benchmark failed with exit code: $BENCH_EXIT_CODE"
-fi
 
 exit $BENCH_EXIT_CODE
