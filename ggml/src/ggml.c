@@ -1134,7 +1134,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 95, "GGML_OP_COUNT != 95");
+static_assert(GGML_OP_COUNT == 96, "GGML_OP_COUNT != 96");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -5482,7 +5482,6 @@ struct ggml_tensor * ggml_kda_scan(
     // h_new: {head_dim, head_dim, n_head, n_seqs}
     const int64_t head_dim = h->ne[0];
     const int64_t n_head = q->ne[1];
-    const int64_t n_seq_tokens = q->ne[2];
     const int64_t n_seqs = q->ne[3];
     struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 
         ggml_nelements(q) + head_dim * head_dim * n_head * n_seqs);
