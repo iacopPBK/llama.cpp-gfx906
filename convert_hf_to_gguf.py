@@ -4988,6 +4988,7 @@ class KimiLinearModel(TextModel):
     _experts: list[dict[str, Tensor]] | None = None
 
     def set_gguf_parameters(self):
+        super().set_gguf_parameters()
         self.gguf_writer.add_vocab_size(self.hparams["vocab_size"])
         
         # Use find_hparam for context length
@@ -5000,14 +5001,6 @@ class KimiLinearModel(TextModel):
             logger.warning("No context length found in config, defaulting to 4096")
             self.gguf_writer.add_context_length(4096)
         
-        self.gguf_writer.add_block_count(self.hparams["num_hidden_layers"])
-        self.gguf_writer.add_embedding_length(self.hparams["hidden_size"])
-        self.gguf_writer.add_feed_forward_length(self.hparams["intermediate_size"])
-        self.gguf_writer.add_head_count(self.hparams["num_attention_heads"])
-        self.gguf_writer.add_head_count_kv(self.hparams["num_key_value_heads"])
-        self.gguf_writer.add_layer_norm_rms_eps(self.hparams["rms_norm_eps"])
-        self.gguf_writer.add_file_type(self.ftype)
-
         # KDA & MLA params
         # Get ssm_d_conv from linear_attn_config.short_conv_kernel_size or ssm_d_conv
         linear_attn_config = self.hparams.get("linear_attn_config", {})
@@ -5053,17 +5046,6 @@ class KimiLinearModel(TextModel):
              head_dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
              self.gguf_writer.add_rope_dimension_count(head_dim)
 
-        self.gguf_writer.add_rope_freq_base(self.hparams.get("rope_theta", 10000.0))
-
-        # MoE params
-        n_experts = self.hparams.get("num_local_experts", self.hparams.get("num_experts"))
-        if n_experts is not None:
-            self.gguf_writer.add_expert_count(n_experts)
-        # Support both num_experts_per_tok and num_experts_per_token
-        n_experts_used = self.hparams.get("num_experts_per_tok", self.hparams.get("num_experts_per_token"))
-        if n_experts_used is not None:
-            self.gguf_writer.add_expert_used_count(n_experts_used)
-        
         # moe_intermediate_size (1024 for Kimi)
         moe_intermediate_size = self.hparams.get("moe_intermediate_size")
         if moe_intermediate_size is not None:
@@ -5078,16 +5060,6 @@ class KimiLinearModel(TextModel):
         first_k_dense_replace = self.hparams.get("first_k_dense_replace")
         if first_k_dense_replace is not None:
             self.gguf_writer.add_leading_dense_block_count(first_k_dense_replace)
-        
-        # Expert gating function (sigmoid for Kimi)
-        moe_router_activation_func = self.hparams.get("moe_router_activation_func", "sigmoid")
-        if moe_router_activation_func == "sigmoid":
-            self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
-        elif moe_router_activation_func == "softmax":
-            self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SOFTMAX)
-        else:
-            logger.warning(f"Unknown moe_router_activation_func: {moe_router_activation_func}, defaulting to sigmoid")
-            self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
         
         # Routed scaling factor (expert_weights_scale = 2.446 for Kimi)
         routed_scaling_factor = self.hparams.get("routed_scaling_factor")
@@ -5220,9 +5192,8 @@ class KimiLinearModel(TextModel):
                 logger.info(f"A_log {name}: numpy {tuple(data_torch.shape)} -> ggml ne={list(reversed(data_torch.shape))}")
         
         # Kimi specific bias
-        if name.endswith("block_sparse_moe.gate.e_score_correction_bias"):
-             new_name = self.format_tensor_name(gguf.MODEL_TENSOR.FFN_EXP_PROBS_B, bid)
-             return [(new_name, data_torch)]
+        if name.endswith("e_score_correction_bias"):
+             name = name.replace("e_score_correction_bias", "e_score_correction.bias")
 
         # process the experts separately
         if name.find("block_sparse_moe.experts") != -1:
@@ -5256,18 +5227,6 @@ class KimiLinearModel(TextModel):
         mapped_name = self.map_tensor_name(name)
         logger.info(f"Returning {mapped_name}: shape after = {tuple(data_torch.shape)}")
         return [(mapped_name, data_torch)]
-
-    def get_vocab_base(self) -> tuple[list[str], list[int], str]:
-        # This method is not used when set_vocab is overridden
-        # But adding it for completeness in case it's called elsewhere
-        logger.warning("get_vocab_base called, but set_vocab is already overridden")
-        vocab_size = self.hparams.get("vocab_size", 100)
-        tokens = [f"<token_{i}>" for i in range(vocab_size)]
-        tokens[0] = "<unk>"
-        tokens[1] = "<s>"
-        tokens[2] = "</s>"
-        toktypes = [gguf.TokenType.NORMAL] * vocab_size
-        return tokens, toktypes, "gpt-2"
 
 @ModelBase.register("InternLM2ForCausalLM")
 class InternLM2Model(TextModel):
