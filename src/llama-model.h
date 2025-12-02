@@ -84,6 +84,7 @@ enum llm_type {
     LLM_TYPE_35B,
     LLM_TYPE_36B,
     LLM_TYPE_40B,
+    LLM_TYPE_48B,
     LLM_TYPE_65B,
     LLM_TYPE_70B,
     LLM_TYPE_120B,
@@ -403,6 +404,23 @@ struct llama_layer {
     struct ggml_tensor * ffn_act_alpha_p = nullptr;
     struct ggml_tensor * ffn_act_beta    = nullptr;
     struct ggml_tensor * ffn_act_eps     = nullptr;
+
+    // Kimi Linear KDA (using ssm_ prefix for consistency)
+    // Note: ssm_dt_b already exists above (mamba bias), reused for Kimi dt_bias
+    struct ggml_tensor * ssm_q_conv = nullptr;
+    struct ggml_tensor * ssm_q_conv_b = nullptr;
+    struct ggml_tensor * ssm_k_conv = nullptr;
+    struct ggml_tensor * ssm_k_conv_b = nullptr;
+    struct ggml_tensor * ssm_v_conv = nullptr;
+    struct ggml_tensor * ssm_v_conv_b = nullptr;
+    struct ggml_tensor * ssm_f_a    = nullptr;
+    struct ggml_tensor * ssm_f_b    = nullptr;
+    struct ggml_tensor * ssm_beta   = nullptr;
+    struct ggml_tensor * ssm_a_log  = nullptr;
+    struct ggml_tensor * ssm_g_a    = nullptr;
+    struct ggml_tensor * ssm_g_b    = nullptr;
+    struct ggml_tensor * ssm_o_norm = nullptr;
+    struct ggml_tensor * ssm_o_norm_b = nullptr;
 
     struct llama_layer_posnet posnet;
 

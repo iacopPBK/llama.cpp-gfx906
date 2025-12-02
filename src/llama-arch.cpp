@@ -112,6 +112,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_RND1,             "rnd1"             },
     { LLM_ARCH_PANGU_EMBED,      "pangu-embedded"   },
     { LLM_ARCH_MISTRAL3,         "mistral3"         },
+    { LLM_ARCH_KIMI_LINEAR,      "kimi-linear"      },
     { LLM_ARCH_UNKNOWN,          "(unknown)"        },
 };
 
@@ -2541,6 +2542,54 @@ static const std::map<llm_arch, std::map<llm_tensor, const char *>> LLM_TENSOR_N
         },
     },
     {
+        LLM_ARCH_KIMI_LINEAR,
+        {
+            { LLM_TENSOR_TOKEN_EMBD,         "token_embd" },
+            { LLM_TENSOR_OUTPUT_NORM,        "output_norm" },
+            { LLM_TENSOR_OUTPUT,             "output" },
+            { LLM_TENSOR_ROPE_FREQS,         "rope_freqs" },
+            { LLM_TENSOR_ATTN_NORM,          "blk.%d.attn_norm" },
+            { LLM_TENSOR_ATTN_Q,             "blk.%d.attn_q" },
+            { LLM_TENSOR_ATTN_K,             "blk.%d.attn_k" },
+            { LLM_TENSOR_ATTN_V,             "blk.%d.attn_v" },
+            { LLM_TENSOR_ATTN_OUT,           "blk.%d.attn_output" },
+            { LLM_TENSOR_FFN_NORM,           "blk.%d.ffn_norm" },
+            // Dense FFN (layer 0 only)
+            { LLM_TENSOR_FFN_GATE,           "blk.%d.ffn_gate" },
+            { LLM_TENSOR_FFN_DOWN,           "blk.%d.ffn_down" },
+            { LLM_TENSOR_FFN_UP,             "blk.%d.ffn_up" },
+            // MoE FFN (layers 1+)
+            { LLM_TENSOR_FFN_GATE_INP,       "blk.%d.ffn_gate_inp" },
+            { LLM_TENSOR_FFN_GATE_EXPS,      "blk.%d.ffn_gate_exps" },
+            { LLM_TENSOR_FFN_DOWN_EXPS,      "blk.%d.ffn_down_exps" },
+            { LLM_TENSOR_FFN_UP_EXPS,        "blk.%d.ffn_up_exps" },
+            { LLM_TENSOR_FFN_EXP_PROBS_B,    "blk.%d.exp_probs_b" },
+            // Shared experts
+            { LLM_TENSOR_FFN_GATE_SHEXP,     "blk.%d.ffn_gate_shexp" },
+            { LLM_TENSOR_FFN_DOWN_SHEXP,     "blk.%d.ffn_down_shexp" },
+            { LLM_TENSOR_FFN_UP_SHEXP,       "blk.%d.ffn_up_shexp" },
+            // KDA (using SSM_ enum prefix, keeping GGUF names for backward compat)
+            { LLM_TENSOR_SSM_CONV1D_Q,       "blk.%d.ssm_conv1d_q" },
+            { LLM_TENSOR_SSM_CONV1D_K,       "blk.%d.ssm_conv1d_k" },
+            { LLM_TENSOR_SSM_CONV1D_V,       "blk.%d.ssm_conv1d_v" },
+            { LLM_TENSOR_SSM_F_A,            "blk.%d.ssm_f_a" },
+            { LLM_TENSOR_SSM_F_B,            "blk.%d.ssm_f_b" },
+            { LLM_TENSOR_SSM_BETA,           "blk.%d.ssm_beta" },
+            { LLM_TENSOR_SSM_A_LOG,          "blk.%d.ssm_a" },
+            { LLM_TENSOR_SSM_DT_B,           "blk.%d.ssm_dt" },
+            { LLM_TENSOR_SSM_G_A,            "blk.%d.ssm_g_a" },
+            { LLM_TENSOR_SSM_G_B,            "blk.%d.ssm_g_b" },
+            { LLM_TENSOR_SSM_NORM,           "blk.%d.ssm_norm" },
+            // MLA
+            { LLM_TENSOR_ATTN_Q_A,           "blk.%d.attn_q_a" },
+            { LLM_TENSOR_ATTN_Q_B,           "blk.%d.attn_q_b" },
+            { LLM_TENSOR_ATTN_Q_A_NORM,      "blk.%d.attn_q_a_norm" },
+            { LLM_TENSOR_ATTN_KV_A_MQA,      "blk.%d.attn_kv_a_mqa" },
+            { LLM_TENSOR_ATTN_KV_B,          "blk.%d.attn_kv_b" },
+            { LLM_TENSOR_ATTN_KV_A_NORM,     "blk.%d.attn_kv_a_norm" },
+        },
+    },
+    {
         LLM_ARCH_UNKNOWN,
         {
             { LLM_TENSOR_TOKEN_EMBD,      "token_embd" },
@@ -2644,6 +2693,17 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
     {LLM_TENSOR_SSM_C_NORM,                 {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
     {LLM_TENSOR_SSM_D,                      {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
     {LLM_TENSOR_SSM_NORM,                   {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+    // Kimi KDA - Conv tensors are 4D [d_conv, 1, d_inner, 1], reshaped to 2D at runtime
+    {LLM_TENSOR_SSM_CONV1D_Q,               {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+    {LLM_TENSOR_SSM_CONV1D_K,               {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+    {LLM_TENSOR_SSM_CONV1D_V,               {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+    {LLM_TENSOR_SSM_F_A,                    {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_SSM_F_B,                    {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_SSM_BETA,                   {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_SSM_A_LOG,                  {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+    {LLM_TENSOR_SSM_DT_B,                   {LLM_TENSOR_LAYER_REPEATING, GGML_OP_ADD}},
+    {LLM_TENSOR_SSM_G_A,                    {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_SSM_G_B,                    {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_TIME_MIX_LERP_X,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
     {LLM_TENSOR_TIME_MIX_LN,                {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
     {LLM_TENSOR_CHANNEL_MIX_LERP_K,         {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
@@ -2801,6 +2861,7 @@ bool llm_arch_is_recurrent(const llm_arch & arch) {
         case LLM_ARCH_RWKV6QWEN2:
         case LLM_ARCH_RWKV7:
         case LLM_ARCH_ARWKV7:
+        case LLM_ARCH_KIMI_LINEAR:  // KDA layers use delta attention with recurrent state
             return true;
         default:
             return false;
@@ -2817,6 +2878,9 @@ bool llm_arch_is_hybrid(const llm_arch & arch) {
         case LLM_ARCH_LFM2MOE:
         case LLM_ARCH_NEMOTRON_H:
         case LLM_ARCH_QWEN3NEXT:
+        // Kimi: Currently using recurrent-only mode since MLA doesn't use KV cache
+        // TODO: Enable hybrid when MLA KV caching is implemented
+        // case LLM_ARCH_KIMI_LINEAR:
             return true;
         default:
             return false;
