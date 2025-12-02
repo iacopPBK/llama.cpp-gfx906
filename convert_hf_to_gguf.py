@@ -5046,6 +5046,17 @@ class KimiLinearModel(TextModel):
              head_dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
              self.gguf_writer.add_rope_dimension_count(head_dim)
 
+        self.gguf_writer.add_rope_freq_base(self.hparams.get("rope_theta", 10000.0))
+
+        # MoE params
+        n_experts = self.hparams.get("num_local_experts", self.hparams.get("num_experts"))
+        if n_experts is not None:
+            self.gguf_writer.add_expert_count(n_experts)
+        # Support both num_experts_per_tok and num_experts_per_token
+        n_experts_used = self.hparams.get("num_experts_per_tok", self.hparams.get("num_experts_per_token"))
+        if n_experts_used is not None:
+            self.gguf_writer.add_expert_used_count(n_experts_used)
+
         # moe_intermediate_size (1024 for Kimi)
         moe_intermediate_size = self.hparams.get("moe_intermediate_size")
         if moe_intermediate_size is not None:
