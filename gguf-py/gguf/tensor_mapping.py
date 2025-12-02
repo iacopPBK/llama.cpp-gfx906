@@ -498,6 +498,7 @@ class TensorNameMap:
             "model.layers.{bid}.mlp.shared_experts.gate_proj",         # deepseek deepseek2
             "model.layers.{bid}.feed_forward.shared_expert.gate_proj", # llama4
             "model.layers.{bid}.mlp.shared_mlp.gate_proj",             # hunyuan
+            "model.layers.{bid}.block_sparse_moe.shared_experts.gate_proj", # kimi
         ),
 
         MODEL_TENSOR.FFN_GATE_CHEXP: (
