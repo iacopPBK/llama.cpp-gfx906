@@ -1,6 +1,6 @@
 # llama.cpp-gfx906-2511
 
-High-performance llama.cpp fork optimized for AMD Radeon Vega 7nm (MI50/MI60) GPUs. Features DPP-accelerated reductions, vectorized quantization kernels, and Q8-optimized flash attention delivering up to 18% faster inference on GFX906 architecture. Based on llama.cpp build 7201.
+Based on llama.cpp build 7201.
 
 
 
