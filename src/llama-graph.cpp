@@ -1817,7 +1817,7 @@ ggml_tensor * llm_graph_context::build_rs(
 
     // copy extra states which won't be changed further (between n_seqs and n_rs)
     // Skip if there are no extra states to copy (n_rs == n_seqs)
-    if (arch != LLM_ARCH_KIMI_LINEAR || n_rs > n_seqs) { // arch check for backward compat
+    if (arch != LLM_ARCH_KIMI_LINEAR || n_rs > (u_int32_t) n_seqs) { // arch check for backward compat
         ggml_tensor * states_extra = ggml_get_rows(ctx0, states, state_copy_extra);
         ggml_build_forward_expand(gf,
             ggml_cpy(ctx0,
