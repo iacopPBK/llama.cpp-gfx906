@@ -9,10 +9,11 @@
 
 using namespace ggml_cuda_mma;
 
-// GFX906 MMQ optimizations (vectorized loads)
+// GFX906 MMQ optimizations (vectorized loads and prefetch)
 #ifdef GGML_USE_HIP
     #include "gfx906/gfx906-mmq.cuh"
     #include "gfx906/gfx906-config.h"
+    #include "gfx906/gfx906-mmq-prefetch.cuh"
 #endif
 
 #define MMQ_DP4A_MAX_BATCH_SIZE 64 // Max. batch size to use for dp4a MMQ kernels when FP16 tensor cores are available.
@@ -3276,6 +3277,14 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 
         __syncthreads();
 
+// GFX906 PREFETCH: Issue AFTER barrier1, BEFORE vec_dot1
+// Maximum overlap: vec_dot1 + barrier2 + Y_tile2_load + barrier3 + vec_dot2 + barrier4 + X_tile_loads
+// Data used at Y_tile1_load in next iteration (~600+ instructions of overlap)
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+        int prefetch_keep_alive = gfx906_prefetch_y_tile_v4<mmq_x, MMQ_TILE_Y_K, nwarps, warp_size>(
+            y, ncols_y, kb0, kb0_stop, qk, blocks_per_iter);
+#endif
+
         vec_dot(tile_x, tile_y, sum, 0);
 
         __syncthreads();
@@ -3293,6 +3302,11 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         __syncthreads();
 
         vec_dot(tile_x, tile_y, sum, MMQ_TILE_NE_K);
+
+// Consume prefetch - keeps register alive until here (after both vec_dots)
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+        gfx906_prefetch_consume(prefetch_keep_alive);
+#endif
 
         __syncthreads();
     }
