@@ -4990,7 +4990,9 @@ class KimiLinearModel(TextModel):
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
         self.gguf_writer.add_vocab_size(self.hparams["vocab_size"])
-        
+        self.gguf_writer.add_leading_dense_block_count(self.hparams["first_k_dense_replace"])
+        self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
+ 
         # Use find_hparam for context length
         # Kimi uses model_max_length
         n_ctx = self.find_hparam(["max_position_embeddings", "model_max_length", "n_ctx", "n_positions"], optional=True)
@@ -5004,6 +5006,18 @@ class KimiLinearModel(TextModel):
         # KDA & MLA params
         # Get ssm_d_conv from linear_attn_config.short_conv_kernel_size or ssm_d_conv
         linear_attn_config = self.hparams.get("linear_attn_config", {})
+        # n_head == 0 for KDA layers, n_head > 0 for MLA layers
+        # full_attention_layers list will be used to distingush layer type
+        _num_kv_heads = list()
+        _full_attn_layers = linear_attn_config["full_attn_layers"]
+        for il in range(self.hparams["num_hidden_layers"]):
+            if il+1 in _full_attn_layers:
+                _num_kv_heads.append(linear_attn_config["num_heads"])
+            else:
+                _num_kv_heads.append(0)
+        assert(len(_num_kv_heads) == self.hparams["num_hidden_layers"])
+        self.gguf_writer.add_head_count_kv(_num_kv_heads)
+
         ssm_d_conv = self.hparams.get("ssm_d_conv") or linear_attn_config.get("short_conv_kernel_size")
         if ssm_d_conv is not None:
              self.gguf_writer.add_ssm_conv_kernel(ssm_d_conv)
@@ -5046,7 +5060,14 @@ class KimiLinearModel(TextModel):
              head_dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
              self.gguf_writer.add_rope_dimension_count(head_dim)
 
-        self.gguf_writer.add_rope_freq_base(self.hparams.get("rope_theta", 10000.0))
+        # Copied from Qwen2Moe as this model inherits parts of it
+        # YaRN is not enabled by default
+        # To enable it, please refer to this guide: https://huggingface.co/Qwen/Qwen3-30B-A3B#processing-long-texts
+        rope_scaling = self.hparams.get("rope_scaling") or {}
+        if rope_scaling.get("rope_type", rope_scaling.get("type")) == "yarn" and "factor" in rope_scaling:
+            self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.YARN)
+            self.gguf_writer.add_rope_scaling_factor(rope_scaling["factor"])
+            self.gguf_writer.add_rope_scaling_orig_ctx_len(rope_scaling["original_max_position_embeddings"])
 
         # MoE params
         n_experts = self.hparams.get("num_local_experts", self.hparams.get("num_experts"))

@@ -339,6 +339,7 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
                 ggml_row_size(kv->type, n_embd_head_qk_nope));
             k_nope = ggml_cont(ctx0, k_nope);
             Vcur = ggml_cont(ctx0, Vcur);
+            cb(Vcur, "mla_V", il);
             
             // Concatenate k_nope + k_pe (broadcast k_pe to all heads)
             // K = [k_nope, k_pe] where k_nope is [qk_nope_head_dim, n_head, n_tokens]
@@ -349,12 +350,11 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
             ggml_tensor * k_pe_repeated = ggml_repeat(ctx0, k_pe, k_pe_target);
             ggml_tensor * Kcur = ggml_concat(ctx0, k_nope, k_pe_repeated, 0);
             cb(Kcur, "mla_K", il);
-            cb(Vcur, "mla_V", il);
             
             // Direct softmax attention (without KV cache)
             // Use build_attn with inp_no_cache for proper mask handling
-            cur = build_attn(inp_no_cache, layer.wo, nullptr, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale_mla, il);
-            cb(cur, "mla_out", il);
+            cur = build_attn(inp_no_cache, layer.wo, NULL, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale_mla, il);
+//            cb(cur, "mla_out", il);
             
         } else {
             // Unknown layer type - this should not happen
@@ -375,18 +375,33 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
         cur = build_norm(ffn_inp, layer.ffn_norm, NULL, LLM_NORM_RMS, il);
         cb(cur, "ffn_norm", il);
 
-        // FFN / MoE
-        if (layer.ffn_gate_inp) {
+        if ((uint32_t) il < hparams.n_layer_dense_lead) {
+            // Dense FFN layer
+            cur = build_ffn(cur,
+                layer.ffn_up, NULL, NULL,
+                layer.ffn_gate, NULL, NULL,
+                layer.ffn_down, NULL, NULL,
+                NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
+            cb(cur, "ffn_out", il);
+        } else {
             // MoE layer
             // Kimi uses moe_renormalize=True and routed_scaling_factor (stored as expert_weights_scale) = 2.446
-            ggml_tensor * moe_out = build_moe_ffn(cur, layer.ffn_gate_inp, layer.ffn_up_exps, layer.ffn_gate_exps, layer.ffn_down_exps, 
-                                layer.ffn_exp_probs_b, hparams.n_expert, hparams.n_expert_used, 
-                                LLM_FFN_SILU, true, true, hparams.expert_weights_scale,
-                                (llama_expert_gating_func_type) hparams.expert_gating_func, il);
+            ggml_tensor * moe_out = build_moe_ffn(cur,
+                layer.ffn_gate_inp,
+                layer.ffn_up_exps,
+                layer.ffn_gate_exps,
+                layer.ffn_down_exps,
+                layer.ffn_exp_probs_b,
+                hparams.n_expert,
+                hparams.n_expert_used,
+                LLM_FFN_SILU, true,
+                true, hparams.expert_weights_scale,
+                (llama_expert_gating_func_type) hparams.expert_gating_func,
+                il);
             cb(moe_out, "ffn_moe_out", il);
             
-            // Shared expert (if present)
-            if (layer.ffn_gate_shexp) {
+            // Shared expert
+            {
                 ggml_tensor * ffn_shexp = build_ffn(cur,
                         layer.ffn_up_shexp, NULL, NULL,
                         layer.ffn_gate_shexp, NULL, NULL,
@@ -396,27 +411,23 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
                 
                 cur = ggml_add(ctx0, moe_out, ffn_shexp);
                 cb(cur, "ffn_out", il);
-            } else {
-                cur = moe_out;
             }
-        } else if (layer.ffn_gate) {
-            // Dense FFN layer
-            cur = build_ffn(cur, layer.ffn_up, NULL, NULL, layer.ffn_gate, NULL, NULL, 
-                           layer.ffn_down, NULL, NULL, NULL, LLM_FFN_SILU, LLM_FFN_PAR, il);
-            cb(cur, "ffn_out", il);
-        } else {
-            // No FFN - this should not happen in Kimi
-            GGML_ABORT("Kimi layer missing FFN tensors");
         }
-
         // Residual
         cur = ggml_add(ctx0, cur, ffn_inp);
+
+        cur = build_cvec(cur, il);
+        cb(cur, "l_out", il);
+
         inpL = cur;
     }
+    cur = inpL;
 
     // Final Norm
-    cur = build_norm(inpL, model.output_norm, NULL, LLM_NORM_RMS, -1);
+    cur = build_norm(cur, model.output_norm, NULL, LLM_NORM_RMS, -1);
+
     cb(cur, "result_norm", -1);
+    res->t_embd = cur;
 
     // Output
     cur = ggml_mul_mat(ctx0, model.output, cur);

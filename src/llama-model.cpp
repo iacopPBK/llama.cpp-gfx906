@@ -120,6 +120,7 @@ const char * llm_type_name(llm_type type) {
         case LLM_TYPE_16B_A1B:       return "16B.A1B";
         case LLM_TYPE_21B_A3B:       return "21B.A3B";
         case LLM_TYPE_30B_A3B:       return "30B.A3B";
+        case LLM_TYPE_48B_A3B:       return "48B.A3B";
         case LLM_TYPE_100B_A6B:      return "100B.A6B";
         case LLM_TYPE_106B_A12B:     return "106B.A12B";
         case LLM_TYPE_230B_A10B:     return "230B.A10B";
@@ -2299,13 +2300,9 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 // qk_rope_head_dim = 64, qk_nope_head_dim = 128, qk_head_dim = 192
 
                 // Mark KDA layers as recurrent using n_head_kv pattern (like Jamba)
-                // MLA layers are at: 3, 7, 11, 15, 19, 23, 26 (7 MLA layers total)
-                // KDA layers are all others: 0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 16, 17, 18, 20, 21, 22, 24, 25 (20 KDA layers)
                 // Set n_head_kv = 0 for KDA layers (recurrent), n_head_kv = n_head for MLA layers (attention)
                 for (uint32_t i = 0; i < hparams.n_layer; ++i) {
-                    bool is_mla = (i == 3 || i == 7 || i == 11 || i == 15 || i == 19 || i == 23 || i == 26);
-                    hparams.n_head_kv_arr[i] = is_mla ? hparams.n_head() : 0;
-                    hparams.recurrent_layer_arr[i] = !is_mla;  // KDA layers are recurrent
+                    hparams.recurrent_layer_arr[i] = hparams.n_head_kv(i) == 0;  // KDA layers are recurrent
                 }
 
                 // MoE parameters - Kimi uses moe_intermediate_size = 1024
@@ -2316,18 +2313,8 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 ml.get_key(LLM_KV_EXPERT_WEIGHTS_SCALE,              hparams.expert_weights_scale, false);
                 ml.get_key(LLM_KV_EXPERT_GATING_FUNC,                hparams.expert_gating_func, false);
 
-                // Default values if not in GGUF
-                if (hparams.n_ff_exp == 0) hparams.n_ff_exp = 1024;  // moe_intermediate_size
-                if (hparams.n_ff_shexp == 0) hparams.n_ff_shexp = 9216;  // shared_expert_intermediate_size = intermediate_size
-                if (hparams.n_expert_shared == 0) hparams.n_expert_shared = 1;  // num_shared_experts
-                if (hparams.n_layer_dense_lead == 0) hparams.n_layer_dense_lead = 1;  // first_k_dense_replace
-                if (hparams.expert_weights_scale == 0.0f) hparams.expert_weights_scale = 2.446f;  // routed_scaling_factor
-
-                // MoE gating function - Kimi uses sigmoid (moe_router_activation_func: sigmoid)
-                if (hparams.expert_gating_func == 0) hparams.expert_gating_func = LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID;
-
                 switch (hparams.n_layer) {
-                    case 27: type = LLM_TYPE_48B; break; // Kimi-Linear-48B-A3B
+                    case 27: type = LLM_TYPE_48B_A3B; break; // Kimi-Linear-48B-A3B
                     default: type = LLM_TYPE_UNKNOWN;
                 }
             } break;
@@ -7894,6 +7881,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_ARWKV7:
         case LLM_ARCH_WAVTOKENIZER_DEC:
         case LLM_ARCH_NEMOTRON_H:
+        case LLM_ARCH_KIMI_LINEAR:
             return LLAMA_ROPE_TYPE_NONE;
 
         // use what we call a normal RoPE, operating on pairs of consecutive head values
@@ -7912,7 +7900,6 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_ARCTIC:
         case LLM_ARCH_DEEPSEEK:
         case LLM_ARCH_DEEPSEEK2:
-        case LLM_ARCH_KIMI_LINEAR:
         case LLM_ARCH_PLM:
         case LLM_ARCH_CHATGLM:
         case LLM_ARCH_GLM4:
