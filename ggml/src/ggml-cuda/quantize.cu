@@ -1,5 +1,7 @@
 #include "quantize.cuh"
 #include <cstdint>
+// #include <vector>
+// #include <cstdio>
 
 __launch_bounds__(CUDA_QUANTIZE_BLOCK_SIZE, 1)
 static __global__ void quantize_q8_1(
@@ -167,6 +169,42 @@ void quantize_mmq_q8_1_cuda(
         const int64_t ne0, const int64_t ne1, const int64_t ne2, const int64_t ne3, cudaStream_t stream) {
     GGML_ASSERT(ne00 % 4 == 0);
     GGML_ASSERT(ne0 % (4*QK8_1) == 0);
+
+    // --- HOST-SIDE DEBUG VALIDATION (commented out) ---
+    // fprintf(stderr, "[quantize_mmq_q8_1] ne00=%ld s01=%ld s02=%ld s03=%ld ne0=%ld ne1=%ld ne2=%ld ne3=%ld ids=%p x=%p\n",
+    //         (long)ne00, (long)s01, (long)s02, (long)s03, (long)ne0, (long)ne1, (long)ne2, (long)ne3, (void*)ids, (void*)x);
+    //
+    // // Calculate maximum index that will be accessed
+    // int64_t max_i1_val = ne1 - 1;
+    // int64_t max_src_idx = (ne3-1)*s03 + (ne2-1)*s02 + max_i1_val*s01 + (ne0-4);
+    // fprintf(stderr, "[quantize_mmq_q8_1] Grid: (%ld, %ld, %ld) max_src_idx=%ld (assuming no ids remapping)\n",
+    //         (long)ne1, (long)((ne0 + 4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) / (4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ)),
+    //         (long)(ne2*ne3), (long)max_src_idx);
+    //
+    // if (ids) {
+    //     // For MoE: copy ids to host and validate
+    //     std::vector<int32_t> ids_host(ne1);
+    //     CUDA_CHECK(cudaMemcpyAsync(ids_host.data(), ids, ne1 * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+    //     CUDA_CHECK(cudaStreamSynchronize(stream));
+    //
+    //     int64_t max_ids_val = 0;
+    //     int64_t min_ids_val = INT64_MAX;
+    //     for (int64_t i = 0; i < ne1; i++) {
+    //         if (ids_host[i] > max_ids_val) max_ids_val = ids_host[i];
+    //         if (ids_host[i] < min_ids_val) min_ids_val = ids_host[i];
+    //     }
+    //     fprintf(stderr, "[quantize_mmq_q8_1] ids range: [%ld, %ld] (ne1=%ld)\n",
+    //             (long)min_ids_val, (long)max_ids_val, (long)ne1);
+    //
+    //     max_src_idx = (ne3-1)*s03 + (ne2-1)*s02 + max_ids_val*s01 + (ne0-4);
+    //     fprintf(stderr, "[quantize_mmq_q8_1] max_src_idx with ids remapping=%ld\n", (long)max_src_idx);
+    //
+    //     if (max_ids_val * s01 > 1000000000LL) {
+    //         fprintf(stderr, "[quantize_mmq_q8_1] WARNING: max_ids_val * s01 = %ld seems too large!\n",
+    //                 (long)(max_ids_val * s01));
+    //     }
+    // }
+    // --- END DEBUG VALIDATION ---
 
     // ne1 tends to assume the highest values, therefore use it as the "x" dimension of the CUDA grid:
     const int64_t block_num_y = (ne0 + 4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) / (4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ);

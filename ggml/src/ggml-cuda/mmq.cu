@@ -1,17 +1,19 @@
 #include "mmq.cuh"
 #include "quantize.cuh"
 #include "mmid.cuh"
+// #include <vector>
+// #include <cstdio>
 
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
-    static bool first_call = true;
-    if (first_call) {
-#ifdef GGML_USE_HIP
-        fprintf(stderr, "MMQ kernel config: ITER_K=%d, NWARPS=%d (GFX906 optimizations)\n", MMQ_ITER_K, MMQ_NWARPS);
-#else
-        fprintf(stderr, "MMQ kernel config: ITER_K=%d, NWARPS=%d (default)\n", MMQ_ITER_K, MMQ_NWARPS);
-#endif
-        first_call = false;
-    }
+    // static bool first_call = true;
+    // if (first_call) {
+    // #ifdef GGML_USE_HIP
+    //     fprintf(stderr, "MMQ kernel config: ITER_K=%d, NWARPS=%d (GFX906 optimizations)\n", MMQ_ITER_K, MMQ_NWARPS);
+    // #else
+    //     fprintf(stderr, "MMQ kernel config: ITER_K=%d, NWARPS=%d (default)\n", MMQ_ITER_K, MMQ_NWARPS);
+    // #endif
+    //     first_call = false;
+    // }
 
     switch (args.type_x) {
         case GGML_TYPE_Q4_0:
@@ -159,6 +161,27 @@ void ggml_cuda_mul_mat_q(
     const int64_t ne_get_rows = ne12 * n_expert_used;
     GGML_ASSERT(ne1 == n_expert_used);
 
+    // --- DEBUG: Check input ids tensor (routing decisions) (commented out) ---
+    // {
+    //     const int64_t ids_size = ids->ne[0] * ids->ne[1];
+    //     std::vector<int32_t> ids_input_host(ids_size);
+    //     CUDA_CHECK(cudaMemcpyAsync(ids_input_host.data(), ids->data, ids_size * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+    //     CUDA_CHECK(cudaStreamSynchronize(stream));
+    //
+    //     int32_t min_val = INT32_MAX, max_val = INT32_MIN;
+    //     for (int64_t i = 0; i < ids_size; i++) {
+    //         if (ids_input_host[i] < min_val) min_val = ids_input_host[i];
+    //         if (ids_input_host[i] > max_val) max_val = ids_input_host[i];
+    //     }
+    //     fprintf(stderr, "[mmq MoE] INPUT ids tensor: shape=[%ld,%ld] range=[%d, %d] (expect 0 to %ld)\n",
+    //             (long)ids->ne[0], (long)ids->ne[1], min_val, max_val, (long)(ne02-1));
+    //
+    //     if (min_val < 0 || max_val >= ne02) {
+    //         fprintf(stderr, "[mmq MoE] ERROR: Input ids out of range! ne02=%ld\n", (long)ne02);
+    //     }
+    // }
+    // --- END DEBUG ---
+
     ggml_cuda_pool_alloc<int32_t> ids_src1(ctx.pool(), ne_get_rows);
     ggml_cuda_pool_alloc<int32_t> ids_dst(ctx.pool(), ne_get_rows);
     ggml_cuda_pool_alloc<int32_t> expert_bounds(ctx.pool(), ne02 + 1);
@@ -168,9 +191,27 @@ void ggml_cuda_mul_mat_q(
         const int si1  = ids->nb[1] / ggml_element_size(ids);
         const int sis1 = nb12 / nb11;
 
+        // fprintf(stderr, "[mmq MoE] Launching mm_ids_helper: ne02=%ld ne12=%ld n_expert_used=%ld ne11=%ld si1=%d sis1=%d\n",
+        //         (long)ne02, (long)ne12, (long)n_expert_used, (long)ne11, si1, sis1);
+
         ggml_cuda_launch_mm_ids_helper((const int32_t *) ids->data, ids_src1.get(), ids_dst.get(), expert_bounds.get(),
             ne02, ne12, n_expert_used, ne11, si1, sis1, stream);
         CUDA_CHECK(cudaGetLastError());
+
+        // --- DEBUG: Synchronize and check ids_src1 output (commented out) ---
+        // CUDA_CHECK(cudaStreamSynchronize(stream));
+        //
+        // std::vector<int32_t> ids_src1_host(ne_get_rows);
+        // CUDA_CHECK(cudaMemcpy(ids_src1_host.data(), ids_src1.get(), ne_get_rows * sizeof(int32_t), cudaMemcpyDeviceToHost));
+        //
+        // int32_t min_val = INT32_MAX, max_val = INT32_MIN;
+        // for (int64_t i = 0; i < ne_get_rows; i++) {
+        //     if (ids_src1_host[i] < min_val) min_val = ids_src1_host[i];
+        //     if (ids_src1_host[i] > max_val) max_val = ids_src1_host[i];
+        // }
+        // fprintf(stderr, "[mmq MoE] OUTPUT ids_src1: size=%ld range=[%d, %d]\n",
+        //         (long)ne_get_rows, min_val, max_val);
+        // --- END DEBUG ---
     }
 
     const size_t nbytes_src1_q8_1 = ne12*n_expert_used*ne10_padded * sizeof(block_q8_1)/QK8_1 +
