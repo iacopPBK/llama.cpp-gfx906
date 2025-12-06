@@ -236,6 +236,8 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_SSM_GROUP_COUNT,    "%s.ssm.group_count"    },
     { LLM_KV_SSM_DT_B_C_RMS,     "%s.ssm.dt_b_c_rms"     },
 
+    { LLM_KV_KDA_HEAD_DIM, "%s.kda.head_dim" },
+
     { LLM_KV_WKV_HEAD_SIZE, "%s.wkv.head_size" },
 
     { LLM_KV_POSNET_EMBEDDING_LENGTH, "%s.posnet.embedding_length" },

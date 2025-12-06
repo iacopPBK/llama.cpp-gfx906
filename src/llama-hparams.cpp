@@ -137,7 +137,7 @@ uint32_t llama_hparams::n_embd_r() const {
         // for Kimi KDA layers
         // Conv state for Q, K, V: 3 * (d_conv - 1) * n_head * head_dim
         const uint32_t d_inner = n_head() * kda_head_dim;  // 32 * 128 = 4096
-        return 3 * (kda_d_conv > 0 ? kda_d_conv - 1 : 3) * d_inner;
+        return 3 * (ssm_d_conv > 0 ? ssm_d_conv - 1 : 3) * d_inner;
     }
 
     // TODO: maybe support other convolution strides than 1

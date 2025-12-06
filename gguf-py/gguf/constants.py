@@ -205,6 +205,9 @@ class Keys:
         GROUP_COUNT    = "{arch}.ssm.group_count"
         DT_B_C_RMS     = "{arch}.ssm.dt_b_c_rms"
 
+    class KDA:
+        HEAD_DIM = "{arch}.kda.head_dim"
+
     class WKV:
         HEAD_SIZE = "{arch}.wkv.head_size"
 
@@ -3474,6 +3477,9 @@ KEY_SSM_STATE_SIZE     = Keys.SSM.STATE_SIZE
 KEY_SSM_TIME_STEP_RANK = Keys.SSM.TIME_STEP_RANK
 KEY_SSM_GROUP_COUNT    = Keys.SSM.GROUP_COUNT
 KEY_SSM_DT_B_C_RMS     = Keys.SSM.DT_B_C_RMS
+
+# KDA
+KEY_KDA_HEAD_DIM       = Keys.KDA.HEAD_DIM
 
 # tokenization
 KEY_TOKENIZER_MODEL      = Keys.Tokenizer.MODEL

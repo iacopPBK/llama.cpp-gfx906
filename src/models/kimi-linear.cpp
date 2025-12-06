@@ -21,8 +21,8 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
 
     // Kimi dimension constants
     const int64_t n_head = hparams.n_head();
-    const int64_t head_dim = hparams.kda_head_dim > 0 ? hparams.kda_head_dim : 128;
-    const int64_t d_conv = hparams.kda_d_conv > 0 ? hparams.kda_d_conv : 4;
+    const int64_t head_dim = hparams.kda_head_dim;
+    const int64_t d_conv = hparams.ssm_d_conv;
     const int64_t d_inner = n_head * head_dim;  // 32 * 128 = 4096
     const int64_t n_seqs = ubatch.n_seqs;
     const int64_t n_seq_tokens = ubatch.n_seq_tokens;
@@ -33,12 +33,12 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
     GGML_ASSERT(ubatch.n_tokens == n_seq_tokens * n_seqs);
     
     // MLA params
-    const int64_t n_embd_head_k_mla = hparams.n_embd_head_k_mla > 0 ? hparams.n_embd_head_k_mla : 192;
-    const int64_t n_embd_head_v_mla = hparams.n_embd_head_v_mla > 0 ? hparams.n_embd_head_v_mla : 128;
-    const int64_t kv_lora_rank = hparams.n_lora_kv > 0 ? hparams.n_lora_kv : 512;
-    // qk_rope_head_dim = 64 (from Kimi config), NOT hparams.n_rot (which is 72)
+    const int64_t n_embd_head_k_mla = hparams.n_embd_head_k_mla;
+    const int64_t n_embd_head_v_mla = hparams.n_embd_head_v_mla;
+    const int64_t kv_lora_rank = hparams.n_lora_kv;
+    // qk_rope_head_dim = 64 (from Kimi config) which is hparams.n_rot
     // Confirmed from tensor shape: wkv_a_mqa [2304, 576] = [n_embd, kv_lora_rank + qk_rope_head_dim]
-    const int64_t n_embd_head_qk_rope = 64;  // config.qk_rope_head_dim
+    const int64_t n_embd_head_qk_rope = hparams.n_rot;  // config.qk_rope_head_dim
     const int64_t n_embd_head_qk_nope = n_embd_head_k_mla - n_embd_head_qk_rope;  // 192 - 64 = 128
     
     // Attention scale for KDA (1/sqrt(head_dim))

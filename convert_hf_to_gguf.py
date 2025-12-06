@@ -5021,6 +5021,13 @@ class KimiLinearModel(TextModel):
         ssm_d_conv = self.hparams.get("ssm_d_conv") or linear_attn_config.get("short_conv_kernel_size")
         if ssm_d_conv is not None:
              self.gguf_writer.add_ssm_conv_kernel(ssm_d_conv)
+
+        kda_head_dim = self.hparams.get("kda_head_dim") or linear_attn_config.get("head_dim")
+
+        if kda_head_dim is not None:
+             self.gguf_writer.add_kda_head_dim(kda_head_dim)
+        
+        # MLA params - use add_* methods that handle arch substitution
         
         # MLA params - use add_* methods that handle arch substitution
         # Support both HuggingFace naming (q_lora_rank, kv_lora_rank) and internal naming (n_lora_q, n_lora_kv)
@@ -5035,8 +5042,9 @@ class KimiLinearModel(TextModel):
         # MLA head dimensions
         # Support HuggingFace naming: qk_nope_head_dim, qk_rope_head_dim, v_head_dim
         qk_nope_head_dim = self.hparams.get("qk_nope_head_dim")
-        qk_rope_head_dim = self.hparams.get("qk_rope_head_dim", self.hparams.get("n_rot"))
+        qk_rope_head_dim = self.hparams.get("qk_rope_head_dim")
         v_head_dim = self.hparams.get("v_head_dim")
+        self.gguf_writer.add_rope_dimension_count(self.hparams["qk_rope_head_dim"])
         
         # Calculate n_embd_head_k_mla = qk_nope_head_dim + qk_rope_head_dim
         if "n_embd_head_k_mla" in self.hparams:

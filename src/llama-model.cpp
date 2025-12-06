@@ -2291,10 +2291,8 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 ml.get_key(LLM_KV_ATTENTION_VALUE_LENGTH_MLA,  hparams.n_embd_head_v_mla, false);
                 ml.get_key(LLM_KV_ATTENTION_KV_LORA_RANK,      hparams.n_lora_kv, false);
                 ml.get_key(LLM_KV_ROPE_DIMENSION_COUNT,        hparams.n_rot, false);
-
-                // KDA (Delta Attention) parameters
-                hparams.kda_head_dim = 128;  // linear_attn_config.head_dim
-                hparams.kda_d_conv = 4;      // linear_attn_config.short_conv_kernel_size
+                ml.get_key(LLM_KV_SSM_CONV_KERNEL,             hparams.ssm_d_conv, false);
+                ml.get_key(LLM_KV_KDA_HEAD_DIM,                hparams.kda_head_dim, false);
 
                 // MLA qk_rope_head_dim (for reference)
                 // qk_rope_head_dim = 64, qk_nope_head_dim = 128, qk_head_dim = 192
@@ -6447,9 +6445,9 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         // Assuming KDA layer if KDA tensors are present
 
                         // KDA uses head_dim = 128 (from linear_attn_config.head_dim)
-                        const int64_t n_embd_head_k_kda = 128;
-                        const int64_t n_embd_head_v_kda = 128;
-                        const int64_t ssm_d_conv = hparams.ssm_d_conv > 0 ? hparams.ssm_d_conv : 4;
+                        const int64_t n_embd_head_k_kda = hparams.kda_head_dim;
+                        const int64_t n_embd_head_v_kda = hparams.kda_head_dim;
+                        const int64_t ssm_d_conv = hparams.ssm_d_conv;
 
                         // Try loading KDA specific tensors (using SSM_ prefix)
                         // Conv1d weights: try 4D first, then 3D (quantization may remove trailing 1)
@@ -6513,8 +6511,8 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                              // MLA Layer - use MLA-specific head dimensions
                              const int64_t q_lora_rank  = hparams.n_lora_q;
                              const int64_t kv_lora_rank = hparams.n_lora_kv;
-                             const int64_t n_embd_head_k_mla = hparams.n_embd_head_k_mla > 0 ? hparams.n_embd_head_k_mla : 192;
-                             const int64_t n_embd_head_v_mla = hparams.n_embd_head_v_mla > 0 ? hparams.n_embd_head_v_mla : 128;
+                             const int64_t n_embd_head_k_mla = hparams.n_embd_head_k_mla;
+                             const int64_t n_embd_head_v_mla = hparams.n_embd_head_v_mla;
 
                              layer.attn_q_a_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_A_NORM, "weight", i), {q_lora_rank}, TENSOR_NOT_REQUIRED);
                              layer.attn_kv_a_norm = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_NORM, "weight", i), {kv_lora_rank}, 0);
@@ -6529,7 +6527,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
 
                              // Kimi: qk_rope_head_dim = 64 (actual RoPE dimension for MLA)
                              // Note: hparams.n_rot may be 72 (from conversion) but actual is 64
-                             const int64_t qk_rope_head_dim = 64;  // From config: qk_rope_head_dim
+                             const int64_t qk_rope_head_dim = hparams.n_rot;  // From config: qk_rope_head_dim
                              layer.wkv_a_mqa = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_MQA, "weight", i), {n_embd, kv_lora_rank + qk_rope_head_dim}, 0);
                              layer.wkv_b = create_tensor(tn(LLM_TENSOR_ATTN_KV_B, "weight", i), {kv_lora_rank, n_head * (n_embd_head_k_mla - qk_rope_head_dim + n_embd_head_v_mla)}, 0);
 
@@ -6539,7 +6537,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, 0);
 
                         // MoE intermediate size (different from dense FFN)
-                        const int64_t n_ff_exp = hparams.n_ff_exp > 0 ? hparams.n_ff_exp : 1024;
+                        const int64_t n_ff_exp = hparams.n_ff_exp;
 
                         // Kimi uses n_layer_dense_lead to determine which layers use dense FFN vs MoE
                         // first_k_dense_replace = 1 means layer 0 uses dense FFN, layers 1+ use MoE

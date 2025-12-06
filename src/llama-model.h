@@ -84,7 +84,6 @@ enum llm_type {
     LLM_TYPE_35B,
     LLM_TYPE_36B,
     LLM_TYPE_40B,
-    LLM_TYPE_48B,
     LLM_TYPE_65B,
     LLM_TYPE_70B,
     LLM_TYPE_120B,
@@ -114,6 +113,7 @@ enum llm_type {
     LLM_TYPE_16B_A1B,
     LLM_TYPE_21B_A3B, // Ernie MoE small
     LLM_TYPE_30B_A3B,
+    LLM_TYPE_48B_A3B, // Kimi Linear
     LLM_TYPE_80B_A3B, // Qwen3 Next
     LLM_TYPE_100B_A6B,
     LLM_TYPE_106B_A12B, // GLM-4.5-Air
