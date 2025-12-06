@@ -35,32 +35,35 @@ static __device__ __forceinline__ int get_int_b4(const void * x, const int & i32
 __constant__ uint8_t mxfp4_magnitudes[8] = { 0, 1, 2, 3, 4, 6, 8, 12 };
 #endif
 
-static __device__ __forceinline__ int2 get_int_from_mxfp4_table(const int & q4) {
+static __device__ __forceinline__ int2 get_int_from_mxfp4_table(const uint32_t q4) {
 #if defined(GGML_USE_HIP) && defined(__gfx906__)
     // GFX906-optimized: 2 v_perm instead of 4
+    // ASSUMES: no -0 in input (nibble 0x8 never occurs in valid MXFP4)
     const uint32_t *mags32 = (const uint32_t *)mxfp4_magnitudes;
+
     const uint32_t q_even = q4;
-    const uint32_t q_odd  = (q4 >> 4);
+    const uint32_t q_odd  = q4 >> 4;
+
+    // Extract sign bits early for ILP (runs parallel with v_perm)
+    uint32_t sign_even = (q_even >> 3) & 0x01010101;
+    uint32_t sign_odd  = (q_odd  >> 3) & 0x01010101;
 
     // Extract 3-bit magnitude indices
     const uint32_t sel_even = q_even & 0x07070707;
-    const uint32_t sel_odd  = q_odd & 0x07070707;
+    const uint32_t sel_odd  = q_odd  & 0x07070707;
 
     // 2 v_perm for magnitude lookup (8-byte table fits in mags32[0-1])
     uint32_t mag_even = __builtin_amdgcn_perm(mags32[1], mags32[0], sel_even);
     uint32_t mag_odd  = __builtin_amdgcn_perm(mags32[1], mags32[0], sel_odd);
 
-    // Extract sign bits (bit 3 of each nibble)
-    uint32_t sign_even = (q_even >> 3) & 0x01010101;
-    uint32_t sign_odd  = (q_odd >> 3) & 0x01010101;
+    // Expand sign to byte mask: 0x01 -> 0xFF
+    const uint32_t mask_even = sign_even * 0xFFu;
+    const uint32_t mask_odd  = sign_odd  * 0xFFu;
 
-    // Apply sign using twos complement: -x = ~x + 1
-    // Since max magnitude is 12 (0x0C), no byte overflow from +1
-    uint32_t mask_even = sign_even * 0xFF;  // 0x01 -> 0xFF per byte
-    uint32_t mask_odd  = sign_odd * 0xFF;
-
+    // Apply sign: (mag ^ mask) + sign = twos complement negation per byte
+    // Safe: max(mag)=12 -> ~12+1 = 0xF4 (no carry beyond byte boundary)
     uint32_t res_x = (mag_even ^ mask_even) + sign_even;
-    uint32_t res_y = (mag_odd ^ mask_odd) + sign_odd;
+    uint32_t res_y = (mag_odd  ^ mask_odd)  + sign_odd;
 
     return make_int2(res_x, res_y);
 #else
@@ -359,6 +362,23 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
 
     const int * q8 = (const int *) bq8_1->qs + iqs;
 
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+    // Software pipelined: load all q4 first, then dequant all, then dp4a all
+    // This hides v_perm 4-cycle latency by issuing all dequants before any dp4a
+    const int aux_q4_0 = get_int_b1(bq4->qs, iqs + 0);
+    const int aux_q4_1 = get_int_b1(bq4->qs, iqs + 1);
+
+    // Dequant both - v_perm instructions can issue back-to-back
+    const int2 v0 = get_int_from_mxfp4_table(aux_q4_0);
+    const int2 v1 = get_int_from_mxfp4_table(aux_q4_1);
+
+    // DP4A - by now v_perm results are ready
+    int sumi = 0;
+    sumi = ggml_cuda_dp4a(v0.x, q8[0], sumi);
+    sumi = ggml_cuda_dp4a(v0.y, q8[4], sumi);
+    sumi = ggml_cuda_dp4a(v1.x, q8[1], sumi);
+    sumi = ggml_cuda_dp4a(v1.y, q8[5], sumi);
+#else
     int sumi = 0;
 #pragma unroll
     for (int l = 0; l < VDR_MXFP4_Q8_1_MMVQ; ++l) {
@@ -368,6 +388,7 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
         sumi = ggml_cuda_dp4a(v.x, q8[l + 0], sumi);
         sumi = ggml_cuda_dp4a(v.y, q8[l + 4], sumi);
     }
+#endif
 
     const float d = ggml_cuda_e8m0_to_fp32(bq4->e) * 0.5f * __low2float(bq8_1->ds);
     return d * sumi;
