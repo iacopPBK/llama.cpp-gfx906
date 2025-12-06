@@ -761,7 +761,7 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         const block_mxfp4 * bxi = (const block_mxfp4 *) x + kbx0 + i*stride + kbx;
 
         const int aux_q4 = get_int_b1(bxi->qs, kqsx);
-        const int2 v = get_int_from_table_16(aux_q4, kvalues_mxfp4);
+        const int2 v = get_int_from_mxfp4_table(aux_q4);
         const int k0 = kbx * (2 * QI_MXFP4) + kqsx;
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)

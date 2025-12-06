@@ -28,6 +28,57 @@ static __device__ __forceinline__ int get_int_b4(const void * x, const int & i32
     return ((const int *) x)[i32]; // assume at least 4 byte alignment
 }
 
+// MXFP4-specialized lookup using only 2 v_perm + arithmetic sign handling
+// Exploits that MXFP4 table is: {0,1,2,3,4,6,8,12, 0,-1,-2,-3,-4,-6,-8,-12}
+// where table[8+i] = -table[i], so we can lookup magnitude and apply sign separately
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+__constant__ uint8_t mxfp4_magnitudes[8] = { 0, 1, 2, 3, 4, 6, 8, 12 };
+#endif
+
+static __device__ __forceinline__ int2 get_int_from_mxfp4_table(const int & q4) {
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+    // GFX906-optimized: 2 v_perm instead of 4
+    const uint32_t *mags32 = (const uint32_t *)mxfp4_magnitudes;
+    const uint32_t q_even = q4;
+    const uint32_t q_odd  = (q4 >> 4);
+
+    // Extract 3-bit magnitude indices
+    const uint32_t sel_even = q_even & 0x07070707;
+    const uint32_t sel_odd  = q_odd & 0x07070707;
+
+    // 2 v_perm for magnitude lookup (8-byte table fits in mags32[0-1])
+    uint32_t mag_even = __builtin_amdgcn_perm(mags32[1], mags32[0], sel_even);
+    uint32_t mag_odd  = __builtin_amdgcn_perm(mags32[1], mags32[0], sel_odd);
+
+    // Extract sign bits (bit 3 of each nibble)
+    uint32_t sign_even = (q_even >> 3) & 0x01010101;
+    uint32_t sign_odd  = (q_odd >> 3) & 0x01010101;
+
+    // Apply sign using twos complement: -x = ~x + 1
+    // Since max magnitude is 12 (0x0C), no byte overflow from +1
+    uint32_t mask_even = sign_even * 0xFF;  // 0x01 -> 0xFF per byte
+    uint32_t mask_odd  = sign_odd * 0xFF;
+
+    uint32_t res_x = (mag_even ^ mask_even) + sign_even;
+    uint32_t res_y = (mag_odd ^ mask_odd) + sign_odd;
+
+    return make_int2(res_x, res_y);
+#else
+    // Inline generic implementation for non-GFX906
+    const int      q0_32  = (q4 >> 0) & 0x0F0F0F0F;
+    const int8_t * q0_8   = (const int8_t *) &q0_32;
+    const char4    val0_8 = make_char4(
+        kvalues_mxfp4[q0_8[0]], kvalues_mxfp4[q0_8[1]], kvalues_mxfp4[q0_8[2]], kvalues_mxfp4[q0_8[3]]);
+
+    const int      q1_32  = (q4 >> 4) & 0x0F0F0F0F;
+    const int8_t * q1_8   = (const int8_t *) &q1_32;
+    const char4    val1_8 = make_char4(
+        kvalues_mxfp4[q1_8[0]], kvalues_mxfp4[q1_8[1]], kvalues_mxfp4[q1_8[2]], kvalues_mxfp4[q1_8[3]]);
+
+    return make_int2(*((const int *) &val0_8), *((const int *) &val1_8));
+#endif
+}
+
 // q4 contains 8 indices with 4 bit each.
 // This function selects those bytes from table that are at those indices and returns them as int2.
 // The first int contains the bytes with even indices in q4, the second int contains the bytes with odd indices in q4.
@@ -39,19 +90,28 @@ static __device__ __forceinline__ int2 get_int_from_table_16(const int & q4, con
     const uint32_t q_even = q4;
     const uint32_t q_odd  = (q4 >> 4);
 
-    // Perform lookups in the lower half of the table (indices 0-7).
-    uint32_t v_even_low = __builtin_amdgcn_perm(values[1], values[0], q_even & 0x07070707);
-    uint32_t v_odd_low = __builtin_amdgcn_perm(values[1], values[0], q_odd & 0x07070707);
+    // Extract 3-bit selectors for v_perm lookups
+    const uint32_t sel_even = q_even & 0x07070707;
+    const uint32_t sel_odd  = q_odd & 0x07070707;
 
-    // Perform lookups in the upper half of the table (indices 8-15).
-    uint32_t v_even_high = __builtin_amdgcn_perm(values[3], values[2], q_even & 0x07070707);
-    uint32_t v_odd_high = __builtin_amdgcn_perm(values[3], values[2], q_odd & 0x07070707);
+    // Perform lookups in both table halves (4 v_perm total)
+    uint32_t v_even_low = __builtin_amdgcn_perm(values[1], values[0], sel_even);
+    uint32_t v_odd_low = __builtin_amdgcn_perm(values[1], values[0], sel_odd);
+    uint32_t v_even_high = __builtin_amdgcn_perm(values[3], values[2], sel_even);
+    uint32_t v_odd_high = __builtin_amdgcn_perm(values[3], values[2], sel_odd);
 
-    // Select between the low and high results based on the MSB of each index nibble.
-    uint32_t mask_even = 0x03020100 | ((q_even & 0x08080808) >> 1);
-    uint32_t res_x = __builtin_amdgcn_perm(v_even_high, v_even_low, mask_even);
-    uint32_t mask_odd = 0x03020100 | ((q_odd & 0x08080808) >> 1);
-    uint32_t res_y = __builtin_amdgcn_perm(v_odd_high, v_odd_low, mask_odd);
+    // Generate byte masks from bit3: expand 0x01 -> 0xFF per byte using shift-or
+    // This compiles to v_mul_lo_u32 by 0xFF which correctly expands isolated bytes
+    uint32_t b3e = (q_even >> 3) & 0x01010101;
+    uint32_t me = b3e; me |= me << 1; me |= me << 2; me |= me << 4;
+
+    uint32_t b3o = (q_odd >> 3) & 0x01010101;
+    uint32_t mo = b3o; mo |= mo << 1; mo |= mo << 2; mo |= mo << 4;
+
+    // Select using BFI pattern: (high & mask) | (low & ~mask)
+    // This compiles to 2 v_bfi_b32 instead of 2 v_perm, saving ~2-3%
+    uint32_t res_x = (v_even_high & me) | (v_even_low & ~me);
+    uint32_t res_y = (v_odd_high & mo) | (v_odd_low & ~mo);
 
     return make_int2(res_x, res_y);
 #elif !defined(GGML_USE_MUSA)
@@ -303,7 +363,7 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
 #pragma unroll
     for (int l = 0; l < VDR_MXFP4_Q8_1_MMVQ; ++l) {
         const int aux_q4 = get_int_b1(bq4->qs, iqs + l);
-        const int2 v = get_int_from_table_16(aux_q4, kvalues_mxfp4);
+        const int2 v = get_int_from_mxfp4_table(aux_q4);
 
         sumi = ggml_cuda_dp4a(v.x, q8[l + 0], sumi);
         sumi = ggml_cuda_dp4a(v.y, q8[l + 4], sumi);
