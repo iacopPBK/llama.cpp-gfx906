@@ -673,6 +673,10 @@ static __device__ __forceinline__ float ggml_cuda_e8m0_to_fp32(uint8_t x) {
 #if CUDART_VERSION >= 12080
     const nv_bfloat16 e = __nv_cvt_e8m0_to_bf16raw(x);
     return (float) e;
+#elif defined(GGML_USE_HIP) && defined(__gfx906__)
+    // GFX906: Branchless with direct bit cast
+    const uint32_t bits = x ? ((uint32_t)x << 23) : 0x00400000u;
+    return __uint_as_float(bits);
 #else
     uint32_t bits;
     if (x == 0) {

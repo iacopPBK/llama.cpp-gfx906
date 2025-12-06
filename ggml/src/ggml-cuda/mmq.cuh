@@ -750,6 +750,41 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     const int kbx  = txi / QI_MXFP4;
     const int kqsx = txi % QI_MXFP4;
 
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+    // GFX906: Software pipelining - load all data first, then dequant all
+    // Maximizes memory-level parallelism before compute
+    constexpr int loop_iters = mmq_y / (nrows * nwarps);
+    int aux_q4_cache[loop_iters > 16 ? 16 : loop_iters];
+    int i_cache[loop_iters > 16 ? 16 : loop_iters];
+
+    // Phase 1: Issue all loads
+    #pragma unroll
+    for (int iter = 0; iter < (loop_iters > 16 ? 16 : loop_iters); iter++) {
+        const int i0 = iter * nrows * nwarps;
+        int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+        if (need_check) {
+            i = min(i, i_max);
+        }
+        const block_mxfp4 * bxi = (const block_mxfp4 *) x + kbx0 + i*stride + kbx;
+        aux_q4_cache[iter] = get_int_b1(bxi->qs, kqsx);
+        i_cache[iter] = i;
+    }
+
+    // Phase 2: Dequant and store
+    const int k0 = kbx * (2 * QI_MXFP4) + kqsx;
+    #pragma unroll
+    for (int iter = 0; iter < (loop_iters > 16 ? 16 : loop_iters); iter++) {
+        const int2 v = get_int_from_mxfp4_table(aux_q4_cache[iter]);
+        const int i = i_cache[iter];
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        x_qs[i*MMQ_MMA_TILE_X_K_Q8_1 + k0 + 0]        = v.x;
+        x_qs[i*MMQ_MMA_TILE_X_K_Q8_1 + k0 + QI_MXFP4] = v.y;
+#else
+        x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + 0]        = v.x;
+        x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + QI_MXFP4] = v.y;
+#endif
+    }
+#else
 #pragma unroll
     for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
         int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
@@ -772,6 +807,7 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + QI_MXFP4] = v.y;
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE)  || defined(AMD_WMMA_AVAILABLE)
     }
+#endif
 
     constexpr int blocks_per_tile_x_row = MMQ_TILE_NE_K / QI_MXFP4;
     constexpr int rows_per_warp = warp_size / blocks_per_tile_x_row;

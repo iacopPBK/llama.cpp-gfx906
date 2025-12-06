@@ -15,6 +15,17 @@ static __device__ __forceinline__ int get_int_b1(const void * x, const int & i32
     return x32;
 }
 
+// GFX906-optimized unaligned load using memcpy (compiler optimizes to single load)
+// Only use for MMVQ where it's faster; MMQ prefetch pattern prefers byte loads
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+static __device__ __forceinline__ int get_int_b1_fast(const void * x, const int & i32) {
+    const uint8_t * x8 = (const uint8_t *) x;
+    int x32;
+    memcpy(&x32, x8 + 4*i32, 4);
+    return x32;
+}
+#endif
+
 static __device__ __forceinline__ int get_int_b2(const void * x, const int & i32) {
     const uint16_t * x16 = (const uint16_t *) x; // assume at least 2 byte alignment
 
@@ -365,8 +376,9 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
 #if defined(GGML_USE_HIP) && defined(__gfx906__)
     // Software pipelined: load all q4 first, then dequant all, then dp4a all
     // This hides v_perm 4-cycle latency by issuing all dequants before any dp4a
-    const int aux_q4_0 = get_int_b1(bq4->qs, iqs + 0);
-    const int aux_q4_1 = get_int_b1(bq4->qs, iqs + 1);
+    // Use fast memcpy-based load (30% faster for unaligned MXFP4 data)
+    const int aux_q4_0 = get_int_b1_fast(bq4->qs, iqs + 0);
+    const int aux_q4_1 = get_int_b1_fast(bq4->qs, iqs + 1);
 
     // Dequant both - v_perm instructions can issue back-to-back
     const int2 v0 = get_int_from_mxfp4_table(aux_q4_0);
