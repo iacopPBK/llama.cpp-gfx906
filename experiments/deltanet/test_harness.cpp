@@ -1712,6 +1712,339 @@ bool test_output_with_state() {
 }
 
 // ============================================================================
+// Phase 8 Tests: Full Multi-Chunk Delta-Net
+// ============================================================================
+
+// Full Delta-Net computation for a single head over multiple chunks
+bool test_deltanet_full() {
+    const int S = 128;           // Head dimension (S_k = S_v)
+    const int n_tokens = 192;    // 3 chunks worth
+    const int C = CHUNK_SIZE;    // 64
+
+    // Allocate inputs
+    std::vector<float> h_Q(S * n_tokens), h_K(S * n_tokens), h_V(S * n_tokens);
+    std::vector<float> h_G(n_tokens), h_Beta(n_tokens);
+    std::vector<float> h_state_in(S * S);
+
+    srand(500);
+    fill_random(h_Q.data(), S * n_tokens, -0.3f, 0.3f);
+    fill_random(h_K.data(), S * n_tokens, -0.3f, 0.3f);
+    fill_random(h_V.data(), S * n_tokens, -0.3f, 0.3f);
+    fill_random(h_G.data(), n_tokens, -0.1f, 0.1f);
+    fill_random(h_Beta.data(), n_tokens, -1.0f, 1.0f);
+    fill_random(h_state_in.data(), S * S, -0.1f, 0.1f);
+
+    // Compute reference using host_deltanet_full
+    std::vector<float> h_output_ref(S * n_tokens);
+    std::vector<float> h_state_ref(S * S);
+    host_deltanet_full(h_Q.data(), h_K.data(), h_V.data(),
+                       h_G.data(), h_Beta.data(), h_state_in.data(),
+                       h_output_ref.data(), h_state_ref.data(),
+                       S, n_tokens);
+
+    // GPU computation - process chunk by chunk
+    float* d_K = device_alloc<float>(S * n_tokens);
+    float* d_V = device_alloc<float>(S * n_tokens);
+    float* d_G = device_alloc<float>(n_tokens);
+    float* d_Beta = device_alloc<float>(n_tokens);
+    float* d_state = device_alloc<float>(S * S);
+
+    // Per-chunk temporaries
+    float* d_beta_sig = device_alloc<float>(C);
+    float* d_g_cumsum = device_alloc<float>(C);
+    float* d_gexp = device_alloc<float>(C);
+    float* d_decay_mask = device_alloc<float>(C * C);
+    float* d_K_beta = device_alloc<float>(S * C);
+    float* d_V_beta = device_alloc<float>(S * C);
+    float* d_kmulkbeta = device_alloc<float>(C * C);
+    float* d_k_decay = device_alloc<float>(C * C);
+    float* d_causal = device_alloc<float>(C * C);
+    float* d_attn_pre = device_alloc<float>(C * C);
+    float* d_attn_solved = device_alloc<float>(C * C);
+    float* d_attn_T = device_alloc<float>(C * C);
+    float* d_V_new = device_alloc<float>(S * C);
+    float* d_kbeta_gexp = device_alloc<float>(S * C);
+    float* d_temp = device_alloc<float>(C * S);
+    float* d_K_cumdecay = device_alloc<float>(S * C);
+    float* d_state_scaled = device_alloc<float>(S * S);
+    float* d_kv = device_alloc<float>(S * S);
+
+    // Copy inputs
+    to_device(d_K, h_K.data(), S * n_tokens);
+    to_device(d_V, h_V.data(), S * n_tokens);
+    to_device(d_G, h_G.data(), n_tokens);
+    to_device(d_Beta, h_Beta.data(), n_tokens);
+    to_device(d_state, h_state_in.data(), S * S);
+
+    int block1d = 256;
+    dim3 block2d(16, 16);
+    dim3 grid_C((C + 15) / 16, (C + 15) / 16);
+    dim3 grid_SC((C + 15) / 16, (S + 15) / 16);
+    dim3 grid_S((S + 15) / 16, (S + 15) / 16);
+
+    int n_chunks = (n_tokens + C - 1) / C;
+
+    for (int chunk = 0; chunk < n_chunks; chunk++) {
+        int chunk_start = chunk * C;
+        int chunk_len = std::min(C, n_tokens - chunk_start);
+
+        // Pointers to this chunk's data
+        float* d_K_chunk = d_K + chunk_start;  // Note: strided access, not ideal
+        float* d_V_chunk = d_V + chunk_start;
+        float* d_G_chunk = d_G + chunk_start;
+        float* d_Beta_chunk = d_Beta + chunk_start;
+
+        // For simplicity, copy chunk data to contiguous buffers
+        // In production, we'd use strided access or better memory layout
+        std::vector<float> h_K_chunk(S * chunk_len), h_V_chunk(S * chunk_len);
+        std::vector<float> h_G_chunk(chunk_len), h_Beta_chunk(chunk_len);
+
+        // Extract chunk (K and V are [S, n_tokens], we want [S, chunk_len])
+        for (int s = 0; s < S; s++) {
+            for (int c = 0; c < chunk_len; c++) {
+                h_K_chunk[s * chunk_len + c] = h_K[s * n_tokens + chunk_start + c];
+                h_V_chunk[s * chunk_len + c] = h_V[s * n_tokens + chunk_start + c];
+            }
+        }
+        for (int c = 0; c < chunk_len; c++) {
+            h_G_chunk[c] = h_G[chunk_start + c];
+            h_Beta_chunk[c] = h_Beta[chunk_start + c];
+        }
+
+        // Upload chunk
+        float* d_K_c = device_alloc<float>(S * chunk_len);
+        float* d_V_c = device_alloc<float>(S * chunk_len);
+        float* d_G_c = device_alloc<float>(chunk_len);
+        float* d_Beta_c = device_alloc<float>(chunk_len);
+
+        to_device(d_K_c, h_K_chunk.data(), S * chunk_len);
+        to_device(d_V_c, h_V_chunk.data(), S * chunk_len);
+        to_device(d_G_c, h_G_chunk.data(), chunk_len);
+        to_device(d_Beta_c, h_Beta_chunk.data(), chunk_len);
+
+        // === Intra-chunk computation ===
+        // Step 1: Sigmoid beta
+        kernel_sigmoid<<<(chunk_len + block1d - 1) / block1d, block1d>>>(
+            d_Beta_c, d_beta_sig, chunk_len);
+
+        // Step 2: Cumsum of gate
+        kernel_cumsum_sequential<<<1, 1>>>(d_G_c, d_g_cumsum, chunk_len);
+
+        // Step 3: Decay mask
+        dim3 grid_chunk((chunk_len + 15) / 16, (chunk_len + 15) / 16);
+        kernel_decay_mask<<<grid_chunk, block2d>>>(d_g_cumsum, d_decay_mask, chunk_len);
+
+        // Step 4: K_beta, V_beta
+        kernel_broadcast_mul<<<(S * chunk_len + block1d - 1) / block1d, block1d>>>(
+            d_K_c, d_beta_sig, d_K_beta, S, chunk_len);
+        kernel_broadcast_mul<<<(S * chunk_len + block1d - 1) / block1d, block1d>>>(
+            d_V_c, d_beta_sig, d_V_beta, S, chunk_len);
+
+        // Step 5: K^T @ K_beta
+        kernel_gemm_tn_naive<<<grid_chunk, block2d>>>(
+            d_K_c, d_K_beta, d_kmulkbeta, chunk_len, chunk_len, S);
+
+        // Step 6: k_decay = kmulkbeta * decay_mask
+        kernel_mul<<<(chunk_len * chunk_len + block1d - 1) / block1d, block1d>>>(
+            d_kmulkbeta, d_decay_mask, d_k_decay, chunk_len * chunk_len);
+
+        // Step 7: causal mask and negate
+        kernel_causal_mask<<<grid_chunk, block2d>>>(d_causal, chunk_len);
+        kernel_mul<<<(chunk_len * chunk_len + block1d - 1) / block1d, block1d>>>(
+            d_k_decay, d_causal, d_attn_pre, chunk_len * chunk_len);
+        kernel_neg<<<(chunk_len * chunk_len + block1d - 1) / block1d, block1d>>>(
+            d_attn_pre, d_attn_pre, chunk_len * chunk_len);
+
+        // Step 8: Triangular solve
+        kernel_solve_tri_sequential<<<1, 1>>>(
+            d_attn_pre, d_attn_pre, d_attn_solved, chunk_len, chunk_len);
+
+        // Step 9: Apply causal + identity
+        kernel_apply_causal_identity<<<grid_chunk, block2d>>>(
+            d_attn_solved, d_attn_solved, chunk_len);
+
+        // Step 10: V_new = V_beta @ attn_solved^T
+        kernel_transpose<<<grid_chunk, block2d>>>(d_attn_solved, d_attn_T, chunk_len, chunk_len);
+        dim3 grid_Sc((chunk_len + 15) / 16, (S + 15) / 16);
+        kernel_gemm_nn_naive<<<grid_Sc, block2d>>>(
+            d_V_beta, d_attn_T, d_V_new, S, chunk_len, chunk_len);
+
+        // Step 11: K_cumdecay
+        kernel_exp<<<(chunk_len + block1d - 1) / block1d, block1d>>>(
+            d_g_cumsum, d_gexp, chunk_len);
+        kernel_broadcast_mul<<<(S * chunk_len + block1d - 1) / block1d, block1d>>>(
+            d_K_beta, d_gexp, d_kbeta_gexp, S, chunk_len);
+        dim3 grid_cS((S + 15) / 16, (chunk_len + 15) / 16);
+        kernel_gemm_nt_naive<<<grid_cS, block2d>>>(
+            d_attn_solved, d_kbeta_gexp, d_temp, chunk_len, S, chunk_len);
+        kernel_transpose<<<grid_cS, block2d>>>(d_temp, d_K_cumdecay, chunk_len, S);  // Fixed: grid_cS for [chunk,S] input
+
+        // === State update ===
+        // Get g_last (last element of g_cumsum)
+        std::vector<float> h_g_cumsum(chunk_len);
+        to_host(h_g_cumsum.data(), d_g_cumsum, chunk_len);
+        float g_last = h_g_cumsum[chunk_len - 1];
+        float exp_g_last = expf(g_last);
+
+        // state_new = state * exp(g_last) + K_cumdecay @ V_new^T
+        kernel_scale<<<(S * S + block1d - 1) / block1d, block1d>>>(
+            d_state, d_state_scaled, S * S, exp_g_last);
+        kernel_gemm_nt_tiled<<<grid_S, block2d>>>(
+            d_K_cumdecay, d_V_new, d_kv, S, S, chunk_len);
+        kernel_add<<<(S * S + block1d - 1) / block1d, block1d>>>(
+            d_state_scaled, d_kv, d_state, S * S);
+
+        HIP_CHECK(hipDeviceSynchronize());
+
+        // Cleanup chunk allocations
+        device_free(d_K_c);
+        device_free(d_V_c);
+        device_free(d_G_c);
+        device_free(d_Beta_c);
+    }
+
+    // Copy final state
+    std::vector<float> h_state_out(S * S);
+    to_host(h_state_out.data(), d_state, S * S);
+
+    // Compare state (output comparison would need more work due to layout)
+    float diff_state = max_diff(h_state_ref.data(), h_state_out.data(), S * S);
+    printf("  Final state max_diff: %.2e\n", diff_state);
+
+    bool passed = diff_state < 1e-2f;  // Allow some tolerance for accumulated error
+
+    // Cleanup
+    device_free(d_K); device_free(d_V); device_free(d_G); device_free(d_Beta);
+    device_free(d_state); device_free(d_beta_sig); device_free(d_g_cumsum);
+    device_free(d_gexp); device_free(d_decay_mask); device_free(d_K_beta);
+    device_free(d_V_beta); device_free(d_kmulkbeta); device_free(d_k_decay);
+    device_free(d_causal); device_free(d_attn_pre); device_free(d_attn_solved);
+    device_free(d_attn_T); device_free(d_V_new); device_free(d_kbeta_gexp);
+    device_free(d_temp); device_free(d_K_cumdecay); device_free(d_state_scaled);
+    device_free(d_kv);
+
+    report_test("Phase8: deltanet_full", passed, diff_state);
+    return passed;
+}
+
+// Smaller test for debugging
+bool test_deltanet_single_chunk() {
+    const int S = 128;
+    const int n_tokens = 64;  // Single chunk
+    const int C = CHUNK_SIZE;
+
+    std::vector<float> h_K(S * n_tokens), h_V(S * n_tokens);
+    std::vector<float> h_G(n_tokens), h_Beta(n_tokens);
+    std::vector<float> h_state_in(S * S);
+
+    srand(501);
+    fill_random(h_K.data(), S * n_tokens, -0.3f, 0.3f);
+    fill_random(h_V.data(), S * n_tokens, -0.3f, 0.3f);
+    fill_random(h_G.data(), n_tokens, -0.1f, 0.1f);
+    fill_random(h_Beta.data(), n_tokens, -1.0f, 1.0f);
+    fill_zeros(h_state_in.data(), S * S);  // Start with zero state
+
+    // Host reference
+    std::vector<float> h_output_ref(S * n_tokens);
+    std::vector<float> h_state_ref(S * S);
+    host_deltanet_full(h_K.data(), h_K.data(), h_V.data(),  // Q=K for simplicity
+                       h_G.data(), h_Beta.data(), h_state_in.data(),
+                       h_output_ref.data(), h_state_ref.data(),
+                       S, n_tokens);
+
+    // GPU - single chunk computation
+    float* d_K = device_alloc<float>(S * C);
+    float* d_V = device_alloc<float>(S * C);
+    float* d_G = device_alloc<float>(C);
+    float* d_Beta = device_alloc<float>(C);
+    float* d_state = device_alloc<float>(S * S);
+
+    float* d_beta_sig = device_alloc<float>(C);
+    float* d_g_cumsum = device_alloc<float>(C);
+    float* d_gexp = device_alloc<float>(C);
+    float* d_decay_mask = device_alloc<float>(C * C);
+    float* d_K_beta = device_alloc<float>(S * C);
+    float* d_V_beta = device_alloc<float>(S * C);
+    float* d_kmulkbeta = device_alloc<float>(C * C);
+    float* d_k_decay = device_alloc<float>(C * C);
+    float* d_causal = device_alloc<float>(C * C);
+    float* d_attn_pre = device_alloc<float>(C * C);
+    float* d_attn_solved = device_alloc<float>(C * C);
+    float* d_attn_T = device_alloc<float>(C * C);
+    float* d_V_new = device_alloc<float>(S * C);
+    float* d_kbeta_gexp = device_alloc<float>(S * C);
+    float* d_temp = device_alloc<float>(C * S);
+    float* d_K_cumdecay = device_alloc<float>(S * C);
+    float* d_state_scaled = device_alloc<float>(S * S);
+    float* d_kv = device_alloc<float>(S * S);
+
+    to_device(d_K, h_K.data(), S * C);
+    to_device(d_V, h_V.data(), S * C);
+    to_device(d_G, h_G.data(), C);
+    to_device(d_Beta, h_Beta.data(), C);
+    to_device(d_state, h_state_in.data(), S * S);
+
+    int block1d = 256;
+    dim3 block2d(16, 16);
+    dim3 grid_C((C + 15) / 16, (C + 15) / 16);
+    dim3 grid_SC((C + 15) / 16, (S + 15) / 16);
+    dim3 grid_CS((S + 15) / 16, (C + 15) / 16);
+    dim3 grid_S((S + 15) / 16, (S + 15) / 16);
+
+    // Intra-chunk computation
+    kernel_sigmoid<<<(C + block1d - 1) / block1d, block1d>>>(d_Beta, d_beta_sig, C);
+    kernel_cumsum_sequential<<<1, 1>>>(d_G, d_g_cumsum, C);
+    kernel_decay_mask<<<grid_C, block2d>>>(d_g_cumsum, d_decay_mask, C);
+    kernel_broadcast_mul<<<(S * C + block1d - 1) / block1d, block1d>>>(d_K, d_beta_sig, d_K_beta, S, C);
+    kernel_broadcast_mul<<<(S * C + block1d - 1) / block1d, block1d>>>(d_V, d_beta_sig, d_V_beta, S, C);
+    kernel_gemm_tn_naive<<<grid_C, block2d>>>(d_K, d_K_beta, d_kmulkbeta, C, C, S);
+    kernel_mul<<<(C * C + block1d - 1) / block1d, block1d>>>(d_kmulkbeta, d_decay_mask, d_k_decay, C * C);
+    kernel_causal_mask<<<grid_C, block2d>>>(d_causal, C);
+    kernel_mul<<<(C * C + block1d - 1) / block1d, block1d>>>(d_k_decay, d_causal, d_attn_pre, C * C);
+    kernel_neg<<<(C * C + block1d - 1) / block1d, block1d>>>(d_attn_pre, d_attn_pre, C * C);
+    kernel_solve_tri_sequential<<<1, 1>>>(d_attn_pre, d_attn_pre, d_attn_solved, C, C);
+    kernel_apply_causal_identity<<<grid_C, block2d>>>(d_attn_solved, d_attn_solved, C);
+    kernel_transpose<<<grid_C, block2d>>>(d_attn_solved, d_attn_T, C, C);
+    kernel_gemm_nn_naive<<<grid_SC, block2d>>>(d_V_beta, d_attn_T, d_V_new, S, C, C);
+    kernel_exp<<<(C + block1d - 1) / block1d, block1d>>>(d_g_cumsum, d_gexp, C);
+    kernel_broadcast_mul<<<(S * C + block1d - 1) / block1d, block1d>>>(d_K_beta, d_gexp, d_kbeta_gexp, S, C);
+    kernel_gemm_nt_naive<<<grid_CS, block2d>>>(d_attn_solved, d_kbeta_gexp, d_temp, C, S, C);
+    kernel_transpose<<<grid_CS, block2d>>>(d_temp, d_K_cumdecay, C, S);  // Fixed: use grid_CS for [C,S] input
+
+    // State update
+    std::vector<float> h_g_cumsum(C);
+    HIP_CHECK(hipDeviceSynchronize());
+    to_host(h_g_cumsum.data(), d_g_cumsum, C);
+    float g_last = h_g_cumsum[C - 1];
+    float exp_g_last = expf(g_last);
+
+    kernel_scale<<<(S * S + block1d - 1) / block1d, block1d>>>(d_state, d_state_scaled, S * S, exp_g_last);
+    kernel_gemm_nt_tiled<<<grid_S, block2d>>>(d_K_cumdecay, d_V_new, d_kv, S, S, C);
+    kernel_add<<<(S * S + block1d - 1) / block1d, block1d>>>(d_state_scaled, d_kv, d_state, S * S);
+
+    HIP_CHECK(hipDeviceSynchronize());
+
+    std::vector<float> h_state_out(S * S);
+    to_host(h_state_out.data(), d_state, S * S);
+
+    float diff = max_diff(h_state_ref.data(), h_state_out.data(), S * S);
+    bool passed = diff < 1e-3f;
+
+    // Cleanup
+    device_free(d_K); device_free(d_V); device_free(d_G); device_free(d_Beta);
+    device_free(d_state); device_free(d_beta_sig); device_free(d_g_cumsum);
+    device_free(d_gexp); device_free(d_decay_mask); device_free(d_K_beta);
+    device_free(d_V_beta); device_free(d_kmulkbeta); device_free(d_k_decay);
+    device_free(d_causal); device_free(d_attn_pre); device_free(d_attn_solved);
+    device_free(d_attn_T); device_free(d_V_new); device_free(d_kbeta_gexp);
+    device_free(d_temp); device_free(d_K_cumdecay); device_free(d_state_scaled);
+    device_free(d_kv);
+
+    report_test("Phase8: deltanet_single_chunk", passed, diff);
+    return passed;
+}
+
+// ============================================================================
 // Test Registry
 // ============================================================================
 
@@ -1748,6 +2081,9 @@ std::map<std::string, TestFunc> g_tests = {
     // Phase 7
     {"state_update", test_state_update},
     {"output_with_state", test_output_with_state},
+    // Phase 8
+    {"deltanet_single_chunk", test_deltanet_single_chunk},
+    {"deltanet_full", test_deltanet_full},
 };
 
 std::map<int, std::vector<std::string>> g_phases = {
@@ -1758,6 +2094,7 @@ std::map<int, std::vector<std::string>> g_phases = {
     {5, {"attn_matrix_small", "attn_matrix_64"}},
     {6, {"attn_pre_computation", "solve_causal_identity", "intra_chunk_small", "intra_chunk"}},
     {7, {"state_update", "output_with_state"}},
+    {8, {"deltanet_single_chunk", "deltanet_full"}},
 };
 
 void run_all_tests() {

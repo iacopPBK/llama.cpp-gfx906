@@ -517,33 +517,60 @@ void host_deltanet_full(const float* Q, const float* K, const float* V,
     float* attn_solved = new float[CHUNK_SIZE * CHUNK_SIZE];
     float* V_new = new float[S * CHUNK_SIZE];
     float* K_cumdecay = new float[S * CHUNK_SIZE];
+    float* g_cumsum = new float[CHUNK_SIZE];
+    float* state_temp = new float[S * S];
+    float* kv_temp = new float[S * S];
 
     for (int chunk = 0; chunk < n_chunks; chunk++) {
         int chunk_start = chunk * CHUNK_SIZE;
         int chunk_len = std::min(CHUNK_SIZE, n_tokens - chunk_start);
 
-        // Get chunk pointers
-        const float* Q_chunk = Q + chunk_start;
-        const float* K_chunk = K + chunk_start;
-        const float* V_chunk = V + chunk_start;
-        const float* G_chunk = G + chunk_start;
-        const float* Beta_chunk = Beta + chunk_start;
-        float* Out_chunk = Output + chunk_start;
+        // Get chunk pointers (note: K, V, G, Beta are [dim, n_tokens] layout)
+        // For simplicity, extract chunk data
+        float* K_chunk = new float[S * chunk_len];
+        float* V_chunk = new float[S * chunk_len];
+        float* G_chunk = new float[chunk_len];
+        float* Beta_chunk = new float[chunk_len];
+
+        for (int s = 0; s < S; s++) {
+            for (int c = 0; c < chunk_len; c++) {
+                K_chunk[s * chunk_len + c] = K[s * n_tokens + chunk_start + c];
+                V_chunk[s * chunk_len + c] = V[s * n_tokens + chunk_start + c];
+            }
+        }
+        for (int c = 0; c < chunk_len; c++) {
+            G_chunk[c] = G[chunk_start + c];
+            Beta_chunk[c] = Beta[chunk_start + c];
+        }
 
         // Intra-chunk computation
-        host_intra_chunk(Q_chunk, K_chunk, V_chunk, G_chunk, Beta_chunk,
+        host_intra_chunk(nullptr, K_chunk, V_chunk, G_chunk, Beta_chunk,
                          attn_solved, V_new, K_cumdecay, S, chunk_len);
 
-        // State interaction and output (simplified)
-        // ... full implementation would go here ...
+        // Compute g_cumsum for this chunk (needed for state update)
+        host_cumsum(G_chunk, g_cumsum, chunk_len);
+        float g_last = g_cumsum[chunk_len - 1];
+        float exp_g_last = expf(g_last);
 
-        // State update (simplified)
-        // ... full implementation would go here ...
+        // State update: State_out = State_out * exp(g_last) + K_cumdecay @ V_new^T
+        // K_cumdecay is [S, chunk_len], V_new is [S, chunk_len]
+        // K_cumdecay @ V_new^T is [S, S]
+        host_scale(State_out, state_temp, S * S, exp_g_last);
+        host_matmul_nt(K_cumdecay, V_new, kv_temp, S, S, chunk_len);
+        host_add(state_temp, kv_temp, State_out, S * S);
+
+        delete[] K_chunk;
+        delete[] V_chunk;
+        delete[] G_chunk;
+        delete[] Beta_chunk;
     }
 
     delete[] attn_solved;
     delete[] V_new;
     delete[] K_cumdecay;
+    delete[] g_cumsum;
+    delete[] state_temp;
+    delete[] kv_temp;
 }
 
 // ============================================================================
