@@ -688,6 +688,45 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     const int kbx  = txi / QI8_0;
     const int kqsx = txi % QI8_0;
 
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+    // GFX906: Software pipelining - load all data first, then store all
+    // Maximizes memory-level parallelism for unaligned Q8_0 loads
+    constexpr int loop_iters = mmq_y / (nrows * nwarps);
+    constexpr int cache_size = loop_iters > 16 ? 16 : loop_iters;
+    int qs0_cache[cache_size];
+    int qs1_cache[cache_size];
+    int i_slot_cache[cache_size];
+    bool oob_cache[cache_size];
+
+    // Phase 1: Issue all loads using memcpy-based fast path
+    #pragma unroll
+    for (int iter = 0; iter < cache_size; iter++) {
+        const int i0 = iter * nrows * nwarps;
+        const int i_slot = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+        const int i_read = need_check ? min(i_slot, i_max) : i_slot;
+        const bool oob = need_check && (i_slot > i_max);
+
+        const block_q8_0 * bxi = (const block_q8_0 *) x + kbx0 + i_read*stride + kbx;
+
+        qs0_cache[iter] = oob ? 0 : get_int_b2_fast(bxi[0].qs, kqsx);
+        qs1_cache[iter] = oob ? 0 : get_int_b2_fast(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx);
+        i_slot_cache[iter] = i_slot;
+        oob_cache[iter] = oob;
+    }
+
+    // Phase 2: Store all to LDS
+    #pragma unroll
+    for (int iter = 0; iter < cache_size; iter++) {
+        const int i_slot = i_slot_cache[iter];
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        x_qs[i_slot*MMQ_MMA_TILE_X_K_Q8_0 + 0             + txi] = qs0_cache[iter];
+        x_qs[i_slot*MMQ_MMA_TILE_X_K_Q8_0 + MMQ_TILE_NE_K + txi] = qs1_cache[iter];
+#else
+        x_qs[i_slot*(2*MMQ_TILE_NE_K + 1) + 0             + txi] = qs0_cache[iter];
+        x_qs[i_slot*(2*MMQ_TILE_NE_K + 1) + MMQ_TILE_NE_K + txi] = qs1_cache[iter];
+#endif
+    }
+#else
 #pragma unroll
     for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {
         // GFX906 optimization: Avoid LDS write conflicts in need_check path.
@@ -708,6 +747,7 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
         x_qs[i_slot*(2*MMQ_TILE_NE_K + 1) + MMQ_TILE_NE_K + txi] = oob ? 0 : get_int_b2(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx);
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     }
+#endif
 
     constexpr int blocks_per_tile_x_row = 2*MMQ_TILE_NE_K / QI8_0;
     constexpr int rows_per_warp = warp_size / blocks_per_tile_x_row;
