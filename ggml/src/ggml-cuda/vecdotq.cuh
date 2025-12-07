@@ -33,6 +33,14 @@ static __device__ __forceinline__ int get_int_b2(const void * x, const int & i32
     return x32;
 }
 
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+static __device__ __forceinline__ int get_int_b2_fast(const void * x, const int & i32) {
+    int x32;
+    memcpy(&x32, (const uint8_t*)x + 4*i32, 4);
+    return x32;
+}
+#endif
+
 static __device__ __forceinline__ int get_int_b4(const void * x, const int & i32) {
     return ((const int *) x)[i32]; // assume at least 4 byte alignment
 }
@@ -789,7 +797,11 @@ static __device__ __forceinline__ float vec_dot_q8_0_q8_1(
 
 #pragma unroll
     for (int i = 0; i < VDR_Q8_0_Q8_1_MMVQ; ++i) {
+#if defined(GGML_USE_HIP) && defined(__gfx906__)
+        v[i] = get_int_b2_fast(bq8_0->qs, iqs + i);
+#else
         v[i] = get_int_b2(bq8_0->qs, iqs + i);
+#endif
         u[i] = get_int_b4(bq8_1->qs, iqs + i);
     }
 
