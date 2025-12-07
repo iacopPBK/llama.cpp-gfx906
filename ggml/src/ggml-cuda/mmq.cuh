@@ -3347,24 +3347,10 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 
         __syncthreads();
 
-// GFX906 X-TILE PREFETCH: Issue BEFORE vec_dot2 for next iteration's X-tile
-// Overlaps with vec_dot2 + barrier + loop overhead + X-tile load
-#if defined(GGML_USE_HIP) && defined(__gfx906__)
-        int x_prefetch_keep_alive = 0;
-        if constexpr (type == GGML_TYPE_MXFP4) {
-            x_prefetch_keep_alive = gfx906_prefetch_x_tile_mxfp4<mmq_y, nwarps, warp_size>(
-                x, offset_x, kb0, kb0_stop, blocks_per_iter, stride_row_x);
-        }
-#endif
-
         vec_dot(tile_x, tile_y, sum, MMQ_TILE_NE_K);
 
-// Consume prefetch - keeps registers alive until here (after both vec_dots)
 #if defined(GGML_USE_HIP) && defined(__gfx906__)
         gfx906_prefetch_consume(prefetch_keep_alive);
-        if constexpr (type == GGML_TYPE_MXFP4) {
-            gfx906_prefetch_consume(x_prefetch_keep_alive);
-        }
 #endif
 
         __syncthreads();

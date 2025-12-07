@@ -323,6 +323,21 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         return BEST_FATTN_KERNEL_MMA_F16;
     }
 
+    if (volta_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
+        int gqa_ratio_eff = 1;
+        const int ncols2_max = Q->ne[0] == 576 ? 16 : 8;
+        while (gqa_ratio % (2*gqa_ratio_eff) == 0 && gqa_ratio_eff < ncols2_max) {
+            gqa_ratio_eff *= 2;
+        }
+        if (can_use_vector_kernel && Q->ne[1] * gqa_ratio_eff <= 2) {
+            return BEST_FATTN_KERNEL_VEC;
+        }
+        if (Q->ne[1] * gqa_ratio_eff <= 16) {
+            return BEST_FATTN_KERNEL_TILE;
+        }
+        return BEST_FATTN_KERNEL_MMA_F16;
+    }
+
     // Use the WMMA kernel if possible:
     if (ggml_cuda_should_use_wmma_fattn(cc) && K->ne[1] % FATTN_KQ_STRIDE == 0 && Q->ne[0] != 40 && Q->ne[0] != 72 && Q->ne[0] != 576) {
         if (can_use_vector_kernel && Q->ne[1] <= 2) {
@@ -339,19 +354,18 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
                     return BEST_FATTN_KERNEL_VEC;
                 }
             }
-        } else {
+        }
+#ifndef GGML_USE_HIP
+        else {
             if (Q->ne[1] <= 2) {
                 return BEST_FATTN_KERNEL_VEC;
             }
         }
+#endif
     }
 
 #ifdef GGML_USE_HIP
-    // Use Q8-optimized tile kernel if KV cache is Q8_0:
-    // Can be disabled with GGML_HIP_FATTN_USE_TILE_DOT4=0
     if (K->type == GGML_TYPE_Q8_0 || V->type == GGML_TYPE_Q8_0) {
-        // Q8 kernel only supports head sizes that are multiples of 32
-        // Currently unsupported: 40, 80, 112 (see fattn-tile-q8.cu)
         const bool q8_head_size_supported = (K->ne[0] % 32 == 0) &&
                                             (K->ne[0] != 40) &&
                                             (K->ne[0] != 80) &&
@@ -363,9 +377,8 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
                 return BEST_FATTN_KERNEL_TILE_Q8;
             }
         }
-        // Fall through to return TILE if disabled or unsupported head size
     }
-#endif // GGML_USE_HIP
+#endif
 
     return BEST_FATTN_KERNEL_TILE;
 }

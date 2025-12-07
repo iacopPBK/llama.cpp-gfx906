@@ -681,7 +681,7 @@ static __global__ void flash_attn_tile_q8(
         const float m1,
         const uint32_t n_head_log2,
         const float logit_softcap,
-        const int32_t ne00, const int32_t ne01, const int32_t ne02, const int32_t ne03,
+        const int32_t ne00, const uint3   ne01, const int32_t ne02, const int32_t ne03,
                             const int32_t nb01, const int32_t nb02, const int32_t nb03,
         const int32_t ne10, const int32_t ne11, const int32_t ne12, const int32_t ne13,
                             const int32_t nb11, const int32_t nb12, const int64_t nb13,
@@ -768,7 +768,7 @@ static __global__ void flash_attn_tile_q8(
 
     // Quantize Q matrix to Q8_0 in shared memory
     flash_attn_tile_q8_quantize_Q_to_shared<nwarps*warp_size, ncols, ncols2, DKQ, DKQp, cpw, np, cpy_ne>(
-        Q_f, Q_values, Q_scales, Q_sums, col_Q_0, ne01, nb01, nb02, scale);
+        Q_f, Q_values, Q_scales, Q_sums, col_Q_0, int(ne01.z), nb01, nb02, scale);
 
     // Process all KV tiles
     const int k_VKQ_max = KV_max ? KV_max[sequence*gridDim.x + blockIdx.x] : ne11;
@@ -873,13 +873,13 @@ static __global__ void flash_attn_tile_q8(
         const int j = jc / ncols2;
         const int c = jc % ncols2;
 
-        if (ncols1 > 1 && col_Q_0 + j >= ne01) {
+        if (ncols1 > 1 && col_Q_0 + j >= int(ne01.z)) {
             return;
         }
 
         const float scale = gridDim.y == 1 ? 1.0f/KQ_sum[jc0] : 1.0f;
 
-        const int j_dst_unrolled = ((sequence*ne01 + col_Q_0 + j)*ne02 + head0 + c)*gridDim.y + blockIdx.y;
+        const int j_dst_unrolled = ((sequence*int(ne01.z) + col_Q_0 + j)*ne02 + head0 + c)*gridDim.y + blockIdx.y;
 
         constexpr int cpy_ne_D = cpy_ne/2 < (DVp/2)/warp_size ? cpy_ne/2 : (DVp/2)/warp_size;
 #pragma unroll
