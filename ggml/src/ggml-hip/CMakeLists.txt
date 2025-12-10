@@ -131,6 +131,10 @@ if (GGML_HIP_EXPORT_METRICS)
     set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -Rpass-analysis=kernel-resource-usage --save-temps")
 endif()
 
+if (GGML_HIP_NO_HIPBLASLT)
+    add_compile_definitions(GGML_HIP_NO_HIPBLASLT)
+endif()
+
 if (NOT GGML_CUDA_FA)
     add_compile_definitions(GGML_CUDA_NO_FA)
 endif()

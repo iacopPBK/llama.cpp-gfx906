@@ -1304,7 +1304,7 @@ static void ggml_cuda_op_mul_mat_cublas(
 
         CUBLAS_CHECK(cublasSetStream(ctx.cublas_handle(id), stream));
 
-        if (GGML_CUDA_CC_IS_CDNA(cc) || GGML_CUDA_CC_IS_RDNA4(cc)) {
+        if (GGML_CUDA_CC_IS_CDNA(cc) || GGML_CUDA_CC_IS_RDNA4(cc) || GGML_CUDA_CC_IS_GCN(cc)) {
             const float alpha = 1.0f;
             const float beta = 0.0f;
             CUBLAS_CHECK(
@@ -1924,7 +1924,7 @@ static void ggml_cuda_mul_mat_batched_cublas_impl(ggml_backend_cuda_context & ct
 
     int id = ggml_cuda_get_device();
     const int cc = ggml_cuda_info().devices[id].cc;
-    if (GGML_CUDA_CC_IS_CDNA(cc) || GGML_CUDA_CC_IS_RDNA4(cc)) {
+    if (GGML_CUDA_CC_IS_CDNA(cc) || GGML_CUDA_CC_IS_RDNA4(cc) || GGML_CUDA_CC_IS_GCN(cc)) {
         cu_compute_type = CUBLAS_COMPUTE_32F;
         alpha = &alpha_f32;
         beta = &beta_f32;
@@ -2233,9 +2233,15 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
 
     //TODO update for generic tensor parallelism
     const int cc                 = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
-    bool use_batched_cublas_f16  = src0->type == GGML_TYPE_F16 && (src1->type == GGML_TYPE_F16 || !any_gpus_with_slow_fp16);
-    bool use_batched_cublas_bf16 = src0->type == GGML_TYPE_BF16 && bf16_mma_hardware_available(cc);
-    bool use_batched_cublas_f32  = src0->type == GGML_TYPE_F32;
+#ifdef GGML_HIP_NO_HIPBLASLT
+    // Disable batched cuBLAS for GCN (gfx900/gfx906) - rocBLAS lacks compatible kernels
+    const bool disable_batched_cublas = GGML_CUDA_CC_IS_GCN(cc);
+#else
+    const bool disable_batched_cublas = false;
+#endif
+    bool use_batched_cublas_f16  = !disable_batched_cublas && src0->type == GGML_TYPE_F16 && (src1->type == GGML_TYPE_F16 || !any_gpus_with_slow_fp16);
+    bool use_batched_cublas_bf16 = !disable_batched_cublas && src0->type == GGML_TYPE_BF16 && bf16_mma_hardware_available(cc);
+    bool use_batched_cublas_f32  = !disable_batched_cublas && src0->type == GGML_TYPE_F32;
 
     if (!split && use_mul_mat_vec_f) {
         // the custom F16 vector kernel can be used over batched cuBLAS GEMM

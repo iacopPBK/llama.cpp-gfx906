@@ -337,6 +337,13 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11) {
     return true;
 #endif //GGML_CUDA_FORCE_MMQ
 
+#ifdef GGML_HIP_NO_HIPBLASLT
+    // When hipBLASLt is disabled, force MMQ for GCN (gfx900/gfx906) to avoid hipBLAS crashes
+    if (GGML_CUDA_CC_IS_GCN(cc)) {
+        return true;
+    }
+#endif //GGML_HIP_NO_HIPBLASLT
+
     if (GGML_CUDA_CC_IS_NVIDIA(cc)) {
         return !fp16_mma_hardware_available(cc) || ne11 < MMQ_DP4A_MAX_BATCH_SIZE;
     }

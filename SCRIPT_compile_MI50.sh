@@ -52,6 +52,7 @@ cmake .. \
     -DCMAKE_HIP_FLAGS="-Wno-ignored-attributes -Wno-cuda-compat -Wno-unused-result" \
     -DGGML_HIP=ON \
     -DGGML_HIP_GRAPHS=ON \
+    -DGGML_HIP_NO_HIPBLASLT=ON \
     -DGGML_NATIVE=ON \
     -DGGML_CUDA_FA=ON \
     -DGGML_CUDA_FA_ALL_QUANTS=ON \
