@@ -15,11 +15,13 @@ cat << 'EOF'
             ╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚════╝  ╚═════╝  ╚═════╝                     
 
 EOF
+//This oveclocking script uses upp to tune clocks voltages and power limits.
+//Use at your own risk!
 
-MI50_POWER=225
-MI50_SCLK=2000
-MI50_MCLK=1100
-MI50_CARD=1
+MI50_POWER=225    //Power limit:do not go over 300W
+MI50_SCLK=2000    //Core clock speed
+MI50_MCLK=1100    //Memory clock speed
+MI50_CARD=1       //For multi gpu config, choose your MI50!
 
 DEVICE="/sys/class/drm/card${MI50_CARD}/device"
 UPP_PYTHON="/home/iacoppbk/upp/bin/python3"
