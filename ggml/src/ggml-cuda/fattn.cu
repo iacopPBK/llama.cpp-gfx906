@@ -400,30 +400,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_set_device(ctx.device);
 
-    static bool first_call = true;
     best_fattn_kernel kernel = ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst);
-
-    if (first_call) {
-        const char * kernel_name = "UNKNOWN";
-        switch (kernel) {
-            case BEST_FATTN_KERNEL_TILE: kernel_name = "TILE"; break;
-#ifdef GGML_USE_HIP
-            case BEST_FATTN_KERNEL_TILE_Q8: kernel_name = "TILE_Q8 (dot4)"; break;
-#endif
-            case BEST_FATTN_KERNEL_VEC: kernel_name = "VEC"; break;
-            case BEST_FATTN_KERNEL_WMMA_F16: kernel_name = "WMMA_F16"; break;
-            case BEST_FATTN_KERNEL_MMA_F16: kernel_name = "MMA_F16"; break;
-            default: break;
-        }
-        fprintf(stderr, "Flash Attention kernel: %s\n", kernel_name);
-
-        const char * env_use_dot4 = getenv("GGML_HIP_FATTN_USE_TILE_DOT4");
-        if (env_use_dot4 != nullptr) {
-            fprintf(stderr, "GGML_HIP_FATTN_USE_TILE_DOT4=%s\n", env_use_dot4);
-        }
-
-        first_call = false;
-    }
 
     switch (kernel) {
         case BEST_FATTN_KERNEL_NONE:

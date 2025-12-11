@@ -1,5 +1,8 @@
 #pragma once
 
+// Y-tile prefetch for MMQ: issues global_load_dword for next iteration
+// Hides memory latency by overlapping loads with compute
+
 #include "gfx906-config.h"
 
 #if defined(GGML_USE_HIP) && defined(__gfx906__)

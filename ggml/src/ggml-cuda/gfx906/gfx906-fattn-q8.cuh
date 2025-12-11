@@ -1,29 +1,12 @@
-// Include parent directory files
+// Flash Attention with Q8_0 quantized KV cache for GFX906
+// Uses v_dot4_i32_i8 for INT8 dot products, +16 LDS padding to avoid bank conflicts
+
 #include "../common.cuh"
 #include "../fattn-common.cuh"
 #include "../cpy-utils.cuh"
 
-// Include GFX906-specific files
 #include "gfx906-config.h"
 #include "gfx906-common.cuh"
-
-// ============================================================================
-// Flash Attention Tile-based Q8 Kernel for AMD GFX906
-// ============================================================================
-// Optimized flash attention implementation using Q8_0 quantized KV cache.
-// Uses INT8 dot products (v_dot4_i32_i8) for maximum performance on GFX906.
-// ============================================================================
-
-// ============================================================================
-// Kernel Configuration - AMD GFX906 Optimized Parameters
-// ============================================================================
-// Configuration format: (DKQ, DV, ncols, nthreads, occupancy, nbatch_fa, nbatch_K)
-// - DKQ/DV: Head dimension for K/V
-// - ncols: Number of Q columns processed per block
-// - nthreads: Threads per block
-// - occupancy: Target SM occupancy
-// - nbatch_fa: Number of attention rows per iteration
-// - nbatch_K: Number of K columns loaded in parallel
 
 #define GGML_CUDA_FATTN_TILE_CONFIG_CASE(DKQ_, DV_, ncols_, nthreads, occupancy, nbatch_fa, nbatch_K) \
     if (DKQ == (DKQ_) && DV == (DV_) && ncols == (ncols_)) {                                          \
@@ -128,12 +111,6 @@ static constexpr __device__ int ggml_cuda_fattn_tile_q8_get_nbatch_K(const int D
     return (ggml_cuda_fattn_tile_q8_get_config(DKQ, DV, ncols) >> 23) & ((1 << 9) - 1);
 }
 
-// ============================================================================
-// Data Loading Functions
-// ============================================================================
-
-// Load FP16 data from global memory to shared memory (used for V matrix)
-// This handles the V matrix which remains in FP16 for the final accumulation
 template<int warp_size, int nwarps, int I, int J, int J_padding, bool oob_check>
 static __device__ __forceinline__ void flash_attn_tile_q8_q8_load_tile(
         const half2 * const __restrict__ KV, half2 * const __restrict__ tile_KV, const int stride_KV, const int i_sup) {
@@ -178,9 +155,6 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_load_tile(
     ggml_cuda_unroll<7>{}(load);
 }
 
-// Load Q8_0 quantized data from global memory to shared memory (used for K matrix)
-// Separates INT8 values and FP16 scales for efficient INT8 computation
-// Uses padded row stride to eliminate LDS bank conflicts on GFX906
 template<int warp_size, int nwarps, int I, int J, int K_row_stride, int J_padding, bool oob_check>
 static __device__ __forceinline__ void flash_attn_tile_q8_q8_load_tile_q8(
         const block_q8_0 * const __restrict__ K_q8,
@@ -205,10 +179,8 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_load_tile_q8(
             const int global_block_idx = row * stride_K_q8 + col_block;
             const block_q8_0 src_block = K_q8[global_block_idx];
 
-            // Store scale with transposed layout for coalesced access
             K_scales[col_block * I + row] = src_block.d;
 
-            // Store INT8 values with row padding to avoid bank conflicts
             int8_t * dst = K_values + row * K_row_stride + col_block * 32;
             const int4* src_int4 = (const int4*)src_block.qs;
             int4* dst_int4 = (int4*)dst;
@@ -221,12 +193,6 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_load_tile_q8(
     }
 }
 
-// ============================================================================
-// Q Quantization to Shared Memory
-// ============================================================================
-
-// Quantize Q matrix from FP32 to Q8_0 format in shared memory
-// Performs online quantization during kernel execution for memory efficiency
 template<int nthreads, int ncols, int ncols2, int DKQ, int DKQp, int cpw, int np, int cpy_ne>
 static __device__ __forceinline__ void flash_attn_tile_q8_quantize_Q_to_shared(
         const float * __restrict__ Q_f,
@@ -274,7 +240,6 @@ static __device__ __forceinline__ void flash_attn_tile_q8_quantize_Q_to_shared(
 
         Q_scales[col_block * ncols + jc] = Q_block.d;
 
-        // Store sum of INT8 values for optimization
         int block_sum = 0;
         #pragma unroll
         for (int i = 0; i < QK8_0; i++) {
@@ -293,12 +258,6 @@ static __device__ __forceinline__ void flash_attn_tile_q8_quantize_Q_to_shared(
     __syncthreads();
 }
 
-// ============================================================================
-// K·Q Computation (INT8 Dot Products)
-// ============================================================================
-
-// Compute K·Q attention scores using INT8 dot products
-// Optimized for GFX906 with Q_scale hoisting to reduce redundant loads
 template <int warp_size, int nwarps, int ncols1, int ncols2, int DKQ, int nbatch_fa, int nbatch_K,
     bool use_logit_softcap, bool oob_check>
 static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter_KQ(
@@ -320,10 +279,8 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter_KQ(
     constexpr int cpw   = ncols > nwarps ? ncols/nwarps : 1;
     constexpr int np    = nwarps > ncols ? nwarps/ncols : 1;
 
-    // Add padding to K row stride to avoid LDS bank conflicts
     constexpr int K_row_stride = nbatch_K + 16;
 
-    // Load K tile from global to shared memory
     flash_attn_tile_q8_q8_load_tile_q8<warp_size, nwarps, nbatch_fa, nbatch_K, K_row_stride, cpy_ne, oob_check>
         (K_q8 + int64_t(k_VKQ_0)*stride_K_q8 + (k_KQ_0/32), K_values, K_scales, stride_K_q8, k_VKQ_sup);
     __syncthreads();
@@ -337,14 +294,12 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter_KQ(
     for (int jc0 = 0; jc0 < cpw; ++jc0) {
         const int jc = jc0 + (threadIdx.y / np)*cpw;
 
-        // Hoist Q scales to registers (shared across all K rows)
         half q_scales_hoisted[blocks_per_K_row];
         #pragma unroll
         for (int block_id = 0; block_id < blocks_per_K_row; block_id++) {
             q_scales_hoisted[block_id] = Q_scales[((k_KQ_0/32) + block_id) * ncols + jc];
         }
 
-        // Compute INT8 dot products for each K row
         #pragma unroll 4
         for (int i_KQ_0 = 0; i_KQ_0 < nbatch_fa; i_KQ_0 += np*warp_size) {
             const int i_KQ = i_KQ_0 + (threadIdx.y % np)*warp_size + threadIdx.x;
@@ -352,7 +307,6 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter_KQ(
 
             const int8_t* K_row_base = K_values + i_KQ * K_row_stride;
 
-            // Process all Q8_0 blocks for this K row
             #pragma unroll 2
             for (int block_id = 0; block_id < blocks_per_K_row; block_id++) {
                 const int4* K_ptr4 = (const int4*)(K_row_base + block_id * 32);
@@ -363,7 +317,6 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter_KQ(
                 const int4 Q_lo = Q_ptr4[0];
                 const int4 Q_hi = Q_ptr4[1];
 
-                // INT8 dot product using v_dot4_i32_i8 instruction
                 int acc_int = 0;
                 acc_int = ggml_cuda_dp4a(K_lo.x, Q_lo.x, acc_int);
                 acc_int = ggml_cuda_dp4a(K_lo.y, Q_lo.y, acc_int);
@@ -374,7 +327,6 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter_KQ(
                 acc_int = ggml_cuda_dp4a(K_hi.z, Q_hi.z, acc_int);
                 acc_int = ggml_cuda_dp4a(K_hi.w, Q_hi.w, acc_int);
 
-                // Dequantize: multiply by both K and Q scales
                 const half k_scale_h = K_scales[block_id * nbatch_fa + i_KQ];
                 const half combined_scale_h = __hmul(k_scale_h, q_scales_hoisted[block_id]);
 
@@ -388,12 +340,6 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter_KQ(
     }
 }
 
-// ============================================================================
-// Fast Exponential Approximation
-// ============================================================================
-
-// Fast polynomial approximation of exp() for softmax
-// Uses integer arithmetic for performance on GFX906
 static __device__ __forceinline__ float fast_exp_poly(float x) {
     x = fmaxf(-88.0f, fminf(88.0f, x));
     constexpr float a = 12102203.0f;
@@ -402,12 +348,6 @@ static __device__ __forceinline__ float fast_exp_poly(float x) {
     return __int_as_float(i);
 }
 
-// ============================================================================
-// Main Attention Iteration (K·Q + Softmax + V)
-// ============================================================================
-
-// Complete flash attention iteration: compute K·Q scores, apply softmax, multiply by V
-// Implements online softmax with running max/sum for numerical stability
 template <int warp_size, int nwarps, int ncols1, int ncols2, int DKQ, int DV, int nbatch_fa, int nbatch_K,
     bool use_logit_softcap, bool oob_check, typename T_KQ, typename T_acc>
 static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
@@ -444,18 +384,15 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
     static_assert(cpw % KQ_cs == 0, "bad KQ_cs");
     const int k_VKQ_sup = k_VKQ_max - k_VKQ_0;
 
-    // Track maximum attention score for numerical stability
     float KQ_max_new[cpw];
 #pragma unroll
     for (int jc0 = 0; jc0 < cpw; ++jc0) {
         KQ_max_new[jc0] = KQ_max[jc0];
     }
 
-    // Accumulator for K·Q dot products
     constexpr int num_i_KQ_iters = nbatch_fa/(np*warp_size);
     float KQ_acc[num_i_KQ_iters * cpw] = {0.0f};
 
-    // Compute K·Q scores using tiled INT8 dot products
     constexpr int nbatch_K_last = DKQ % nbatch_K;
     constexpr int num_K_tiles = (DKQ - nbatch_K_last) / nbatch_K;
 
@@ -466,14 +403,12 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
             Q_values, Q_scales, Q_sums, K_q8, K_values, K_scales, stride_K_q8, k_VKQ_0, k_VKQ_sup, k_KQ_0, KQ_acc);
     }
 
-    // Handle remaining K dimension if not evenly divisible
     if constexpr (nbatch_K_last > 0) {
         constexpr int k_KQ_0 = DKQ - nbatch_K_last;
         flash_attn_tile_q8_q8_iter_KQ<warp_size, nwarps, ncols1, ncols2, DKQ, nbatch_fa, nbatch_K_last, use_logit_softcap, oob_check>(
             Q_values, Q_scales, Q_sums, K_q8, K_values, K_scales, stride_K_q8, k_VKQ_0, k_VKQ_sup, k_KQ_0, KQ_acc);
     }
 
-    // Apply logit softcapping and attention mask, find new max
     if constexpr (num_i_KQ_iters == 1) {
         const int i_KQ = (threadIdx.y % np)*warp_size + threadIdx.x;
 
@@ -519,7 +454,6 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
         }
     }
 
-    // Synchronize max across warps if using multiple warps per column
     if constexpr (np == 1) {
         __syncthreads();
     } else {
@@ -533,7 +467,6 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
         KQ_max_new[0] = warp_reduce_max<np>(KQ_max_new[0]);
     }
 
-    // Online softmax: rescale previous values and compute new exp values
     if constexpr (num_i_KQ_iters == 1) {
         const int i_KQ = (threadIdx.y % np)*warp_size + threadIdx.x;
 
@@ -545,20 +478,16 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
             for (int jc1 = 0; jc1 < KQ_cs; ++jc1) {
                 const int jc = jc0 + jc1;
 
-                // Rescale factor for previous accumulated values
                 const float KQ_max_scale = fast_exp_poly(KQ_max[jc] - KQ_max_new[jc]);
                 KQ_max[jc] = KQ_max_new[jc];
 
-                // Compute exp of current scores
                 const float val = !oob_check || i_KQ < k_VKQ_sup ?
                     fast_exp_poly(KQ_acc[jc] - KQ_max[jc]) : 0.0f;
                 const float KQ_sum_add = val;
                 tmp[0][jc1] = val;
 
-                // Update running sum
                 KQ_sum[jc] = KQ_sum[jc]*KQ_max_scale + KQ_sum_add;
 
-                // Rescale accumulated V values
                 const half2 KQ_max_scale_h2 = make_half2(KQ_max_scale, KQ_max_scale);
 #pragma unroll
                 for (int i0 = 0; i0 < DVp/2; i0 += warp_size) {
@@ -610,7 +539,6 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
         }
     }
 
-    // Multiply attention weights by V matrix (FP16 accumulation)
     static_assert(DV <= DKQ, "bad DV");
     static_assert(DV % nbatch_K == 0 || (nbatch_K % 3 == 0 && DV % (nbatch_K*2/3) == 0), "bad nbatch_K");
     constexpr int nbatch_V = (DV % nbatch_K == 0 ? nbatch_K : nbatch_K*2/3) * nbatch_fa / DV;
@@ -618,12 +546,10 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
     static_assert(nbatch_V % np == 0, "bad nbatch_V");
 #pragma unroll
     for (int k0 = 0; k0 < nbatch_fa; k0 += nbatch_V) {
-        // Load V tile (remains in FP16)
         flash_attn_tile_q8_q8_load_tile<warp_size, nwarps, nbatch_V, DV, 0, oob_check>
             (V_h2 + int64_t(k_VKQ_0 + k0)*stride_V2, V_tmp, stride_V2, k_VKQ_sup - k0);
         __syncthreads();
 
-        // Accumulate weighted V into output
 #pragma unroll
         for (int k1 = 0; k1 < nbatch_V; k1 += np) {
             half2 V_k[(DVp/2)/warp_size];
@@ -659,10 +585,6 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
         __syncthreads();
     }
 }
-
-// ============================================================================
-// Main Kernel Entry Point
-// ============================================================================
 
 template<int DKQ, int DV, int ncols1, int ncols2, bool use_logit_softcap>
 __launch_bounds__(ggml_cuda_fattn_tile_q8_get_nthreads(DKQ, DV, ncols1*ncols2), ggml_cuda_fattn_tile_q8_get_occupancy(DKQ, DV, ncols1*ncols2))
@@ -715,7 +637,6 @@ static __global__ void flash_attn_tile_q8(
 
     const int col_Q_0 = blockIdx.x * ncols1;
 
-    // Decode batch/sequence/head indices from block coordinates
     const int sequence = blockIdx.z / (ne02/ncols2);
     const int head0 = blockIdx.z*ncols2 - sequence*ne02;
     const int gqa_ratio = ne02 / ne12;
@@ -742,7 +663,6 @@ static __global__ void flash_attn_tile_q8(
     constexpr int DKQp = (DKQ + 2*warp_size - 1) & ~(2*warp_size - 1);
     constexpr int DVp  = (DV  + 2*warp_size - 1) & ~(2*warp_size - 1);
 
-    // Shared memory allocation
     __shared__ int8_t Q_values[ncols * DKQ];
     __shared__ half   Q_scales[ncols * (DKQ/32)];
 
@@ -758,7 +678,6 @@ static __global__ void flash_attn_tile_q8(
     __shared__ half  KQ[ncols * nbatch_fa];
     half2 VKQ[cpw * ((DVp/2)/warp_size)] = {{0.0f, 0.0f}};
 
-    // Initialize running max and sum for online softmax
     float KQ_max[cpw];
 #pragma unroll
     for (int j0 = 0; j0 < ncols; j0 += nwarps) {
@@ -766,11 +685,9 @@ static __global__ void flash_attn_tile_q8(
     }
     float KQ_sum[cpw] = {0.0f};
 
-    // Quantize Q matrix to Q8_0 in shared memory
     flash_attn_tile_q8_quantize_Q_to_shared<nwarps*warp_size, ncols, ncols2, DKQ, DKQp, cpw, np, cpy_ne>(
         Q_f, Q_values, Q_scales, Q_sums, col_Q_0, int(ne01.z), nb01, nb02, scale);
 
-    // Process all KV tiles
     const int k_VKQ_max = KV_max ? KV_max[sequence*gridDim.x + blockIdx.x] : ne11;
     if (ncols2 == 1) {
         int k_VKQ_0 = blockIdx.y*nbatch_fa;
@@ -796,13 +713,11 @@ static __global__ void flash_attn_tile_q8(
         }
     }
 
-    // Finalize softmax normalization
 #pragma unroll
     for (int jc0 = 0; jc0 < cpw; ++jc0) {
         KQ_sum[jc0] = warp_reduce_sum<warp_size>(KQ_sum[jc0]);
     }
 
-    // Combine results from multiple warps if needed
     if constexpr (np > 1) {
         static_assert(cpw == 1, "bad cpw");
         static_assert(nbatch_fa*nbatch_K >= nwarps*DVp, "KV_tmp too small");
@@ -843,7 +758,6 @@ static __global__ void flash_attn_tile_q8(
         }
     }
 
-    // Apply attention sinks if present
     if (sinks && blockIdx.y == 0) {
 #pragma unroll
         for (int jc0 = 0; jc0 < cpw; ++jc0) {
@@ -865,7 +779,6 @@ static __global__ void flash_attn_tile_q8(
         }
     }
 
-    // Write final output
 #pragma unroll
     for (int jc0 = 0; jc0 < cpw; ++jc0) {
         const int jc = jc0 + (threadIdx.y/np)*cpw;
@@ -914,11 +827,6 @@ static __global__ void flash_attn_tile_q8(
 #endif
 }
 
-// ============================================================================
-// Kernel Launch Infrastructure
-// ============================================================================
-
-// Select appropriate kernel configuration based on Q batch size
 template <int DKQ, int DV, int ncols2, bool use_logit_softcap>
 static void launch_fattn_tile_q8_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * Q = dst->src[0];
@@ -1000,7 +908,6 @@ static void launch_fattn_tile_q8_switch_ncols1(ggml_backend_cuda_context & ctx, 
     GGML_ABORT("fatal error");
 }
 
-// Select GQA optimization level based on ratio
 template <int DKQ, int DV, bool use_logit_softcap>
 static void launch_fattn_tile_q8_switch_ncols2(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * KQV  = dst;
@@ -1047,7 +954,6 @@ static void launch_fattn_tile_q8_switch_ncols2(ggml_backend_cuda_context & ctx, 
     GGML_ABORT("fatal error");
 }
 
-// Entry point for Q8 flash attention
 template <int DKQ, int DV>
 void ggml_cuda_flash_attn_ext_tile_q8_case(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * KQV = dst;
