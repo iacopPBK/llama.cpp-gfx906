@@ -8,6 +8,8 @@ Based on llama.cpp build 7387.
 
 ![Benchmark Results](benchmarks.svg)
 
+See [SCRIPT_llama_bench.sh](SCRIPT_llama_bench.sh) for llama-bench configuration and [SCRIPT_launch_server_MI50.sh](SCRIPT_launch_server_MI50.sh) for server launch settings.
+
 
 
 ## What Changed 
@@ -60,7 +62,7 @@ Tested with ROCm 7.1.1 and GFX906 GPU (MI50/MI60).
 
 ## Power Scaling
 
-Performance scales with power limit using [SCRIPT_overclock_upp_MI50.sh](https://github.com/sibradzic/upp) for MI50 overclocking via UPP (Powerplay Table Editor).
+Performance scales with power limit using [SCRIPT_overclock_upp_MI50.sh](https://github.com/sibradzic/upp) for MI50 overclocking via UPP (Powerplay Table Editor). Results gathered using 2511 release.
 
 ![PP Performance](power_sweep_pp.svg)
 
@@ -68,9 +70,14 @@ Performance scales with power limit using [SCRIPT_overclock_upp_MI50.sh](https:/
 
 
 
-## Links
+## Special Thanks and Links
+Props to these users for spending time on the repo.
 
-[AMD GCN ISA](https://gpuopen.com/learn/amdgcn-assembly/) ・ [llama.cpp](https://github.com/ggml-org/llama.cpp) ・ [ROCm](https://rocm.docs.amd.com/) ・ [GFX906 Discord](https://discord.gg/ZEcgt3dAw) ・ [wiki-gfx906](https://github.com/skyne98/wiki-gfx906) ・ [llama-labs-gfx906](https://github.com/skyne98/llama-labs-gfx906)
+[@fuutott](https://github.com/fuutott) ・ [@mircoboschi](https://github.com/mircoboschi) ・ [@skyne98](https://github.com/skyne98)
+
+---
+
+[AMD GCN ISA](https://gpuopen.com/learn/amdgcn-assembly/) ・ [llama.cpp](https://github.com/ggml-org/llama.cpp) ・ [ROCm](https://rocm.docs.amd.com/) ・ [GFX906 DISCORD](https://discord.gg/ZEcgt3dAw) ・ [wiki-gfx906](https://github.com/skyne98/wiki-gfx906) ・ [llama-labs-gfx906](https://github.com/skyne98/llama-labs-gfx906)
 
 
 
