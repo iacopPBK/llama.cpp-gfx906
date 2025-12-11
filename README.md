@@ -1,6 +1,6 @@
-# llama.cpp-gfx906-2511
+# llama.cpp-gfx906-2512
 
-Based on llama.cpp build 7201.
+Based on llama.cpp build 7387.
 
 
 
@@ -10,7 +10,22 @@ Based on llama.cpp build 7201.
 
 
 
-## What Changed
+## What Changed 
+
+The core modifications are implemented in ggml-cuda/gfx906 folder.
+
+### 2512
+```
+mmq.cuh              Software pipelining for Q8_0 MMQ loads
+mmq.cuh              Optimized Q8 MMQ need_check path to avoid LDS conflicts
+mmq.cuh              MXFP4 load pipeline with e8m0 conversion optimization
+vecdotq.cuh          Fast Q8_0 load path using memcpy
+vecdotq.cuh          Software pipeline MXFP4 MMVQ for v_perm latency hiding
+vecdotq.cuh          MXFP4 lookup with 2-perm + arithmetic sign
+mmq.cu/mmid.cu       MoE sub-warp shuffle fix for wavefront64 (fixes gpt-oss loading problems)
+```
+
+### 2511
 
 ```
 common.cuh           DPP-based warp reductions with unified shuffle XOR dispatch
@@ -19,22 +34,6 @@ fattn.cu             Q8-optimized tile kernel selection for GFX906 flash attenti
 mmq.cu               Integrated GFX906 vectorized loads for Q4_0/Q4_1 quantizations
 gfx906/              New directory with MI50/MI60-specific kernel implementations
 ```
-
-
-
-## Compile-Time Configuration
-
-```cpp
-// Disable Split-K for GFX906 
-#define GFX906_FATTN_SPLIT_K_ENABLED 0
-
-// Enable Q8 quantized flash attention
-#define GFX906_FATTN_Q8_ENABLED 1
-
-// Enable DPP-based warp reductions
-#define GFX906_USE_DPP_REDUCTIONS 1
-```
-
 
 
 ## Quick Start
@@ -51,9 +50,11 @@ git clone https://github.com/iacopPBK/llama.cpp-gfx906.git
 cd llama.cpp-gfx906
 ./SCRIPT_compile_MI50.sh      # edit ROCM_PATH if not using /opt/rocm
 ./SCRIPT_launch_server_MI50.sh # edit MODEL_PATH to your model file
+./SCRIPT_llama_bench.sh # edit MODEL_PATH to your model file, performs the bench shown above
+
 ```
 
-Tested with ROCm nightly build and GFX906 GPU (MI50/MI60).
+Tested with ROCm 7.1.1 and GFX906 GPU (MI50/MI60).
 
 
 
