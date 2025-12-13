@@ -2729,6 +2729,10 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_RWKV_WKV7:
             ggml_cuda_op_rwkv_wkv7(ctx, dst);
             break;
+        case GGML_OP_DELTANET:
+            // ggml_cuda_op_deltanet(ctx, dst);  // Uncomment in Phase 2
+            GGML_ABORT("DELTANET not yet implemented");
+            break;
         case GGML_OP_CROSS_ENTROPY_LOSS_BACK:
             ggml_cuda_cross_entropy_loss_back(ctx, dst);
             break;
@@ -4636,8 +4640,12 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_CUMSUM:
         case GGML_OP_TRI:
         case GGML_OP_DIAG:
-        case GGML_OP_SOLVE_TRI:
             return true;
+        case GGML_OP_SOLVE_TRI:
+            // GFX906: limit SOLVE_TRI dimensions to avoid hipBLASLt crashes
+            return op->src[0]->ne[0] <= 64 && op->src[1]->ne[0] <= 32;
+        case GGML_OP_DELTANET:
+            return false;  // Change to true in Phase 2
 
         default:
             return false;

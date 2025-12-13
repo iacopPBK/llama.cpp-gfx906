@@ -1028,6 +1028,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GATED_LINEAR_ATTN",
     "RWKV_WKV7",
     "SOLVE_TRI",
+    "DELTANET",
 
     "UNARY",
 
@@ -1045,7 +1046,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 95, "GGML_OP_COUNT != 95");
+static_assert(GGML_OP_COUNT == 96, "GGML_OP_COUNT != 96");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1137,6 +1138,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "gated_linear_attn(k, v, q, gate, s)",
     "rwkv_wkv7(r, w, k, v, a, b, s)",
     "A X = B, A triangular, solve X",
+    "deltanet(k, v, q, g, beta, s)",
 
     "unary(x)",
 
@@ -1154,7 +1156,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 95, "GGML_OP_COUNT != 95");
+static_assert(GGML_OP_COUNT == 96, "GGML_OP_COUNT != 96");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -5730,6 +5732,54 @@ struct ggml_tensor * ggml_rwkv_wkv7(
     result->src[4] = a;
     result->src[5] = b;
     result->src[6] = state;
+
+    return result;
+}
+
+// ggml_deltanet
+
+struct ggml_tensor * ggml_deltanet(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * g,
+        struct ggml_tensor  * beta,
+        struct ggml_tensor  * state) {
+    GGML_ASSERT(ggml_is_contiguous(k));
+    GGML_ASSERT(ggml_is_contiguous(v));
+    GGML_ASSERT(ggml_is_contiguous(q));
+    GGML_ASSERT(ggml_is_contiguous(g));
+    GGML_ASSERT(ggml_is_contiguous(beta));
+    GGML_ASSERT(ggml_is_contiguous(state));
+
+    // K, V, Q: [S, n_tokens, H, n_seqs]
+    const int64_t S = k->ne[0];          // Head dimension (128)
+    const int64_t n_tokens = k->ne[1];
+    const int64_t H = k->ne[2];          // Num heads
+    const int64_t n_seqs = k->ne[3];
+
+    // Validate tensor shapes
+    GGML_ASSERT(v->ne[0] == S && v->ne[1] == n_tokens && v->ne[2] == H && v->ne[3] == n_seqs);
+    GGML_ASSERT(q->ne[0] == S && q->ne[1] == n_tokens && q->ne[2] == H && q->ne[3] == n_seqs);
+    GGML_ASSERT(g->ne[0] == n_tokens);  // G: [n_tokens, 1, H, n_seqs]
+    GGML_ASSERT(beta->ne[1] == n_tokens); // Beta: [1, n_tokens, H, n_seqs]
+    GGML_ASSERT(state->ne[0] == S && state->ne[1] == S && state->ne[2] == H && state->ne[3] == n_seqs);
+
+    // Output size: output (S * n_tokens * H * n_seqs) + state (S * S * H * n_seqs)
+    const int64_t output_size = S * n_tokens * H * n_seqs;
+    const int64_t state_size = S * S * H * n_seqs;
+    const int64_t total_size = output_size + state_size;
+
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, total_size);
+
+    result->op     = GGML_OP_DELTANET;
+    result->src[0] = k;
+    result->src[1] = v;
+    result->src[2] = q;
+    result->src[3] = g;
+    result->src[4] = beta;
+    result->src[5] = state;
 
     return result;
 }
