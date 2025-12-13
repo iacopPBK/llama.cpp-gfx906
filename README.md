@@ -1,6 +1,6 @@
 # llama.cpp-gfx906-2512
 
-Based on llama.cpp build 7387.
+Based on llama.cpp build 7371.
 
 
 
