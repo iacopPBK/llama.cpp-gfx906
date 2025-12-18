@@ -1962,10 +1962,6 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_ssm_scan(params, tensor);
             } break;
-        case GGML_OP_KDA_SCAN:
-            {
-                ggml_compute_forward_kda_scan(params, tensor);
-            } break;
         case GGML_OP_WIN_PART:
             {
                 ggml_compute_forward_win_part(params, tensor);
