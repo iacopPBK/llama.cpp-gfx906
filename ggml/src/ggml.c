@@ -999,7 +999,6 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "FLASH_ATTN_BACK",
     "SSM_CONV",
     "SSM_SCAN",
-    "KDA_SCAN",
     "WIN_PART",
     "WIN_UNPART",
     "GET_REL_POS",

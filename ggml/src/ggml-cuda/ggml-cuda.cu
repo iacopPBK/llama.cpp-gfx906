@@ -4503,11 +4503,6 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
                 return op->src[0]->ne[0] == 16 && op->src[0]->ne[1] == 1 && op->src[0]->ne[2] % 128 == 0 && op->src[4]->ne[1] == 1;
             }
         }
-        case GGML_OP_KDA_SCAN: {
-            // KDA scan kernel supports head_dim 64 or 128
-            const int64_t head_dim = op->src[0]->ne[0];
-            return head_dim == 64 || head_dim == 128;
-        }
         case GGML_OP_SSM_CONV: {
             // assumes d_inner % threads == 0
             return op->src[0]->ne[1] % 128 == 0;
