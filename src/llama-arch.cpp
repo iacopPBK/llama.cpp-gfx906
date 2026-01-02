@@ -2863,7 +2863,6 @@ bool llm_arch_is_recurrent(const llm_arch & arch) {
         case LLM_ARCH_RWKV6QWEN2:
         case LLM_ARCH_RWKV7:
         case LLM_ARCH_ARWKV7:
-        case LLM_ARCH_KIMI_LINEAR:  // KDA layers use delta attention with recurrent state
             return true;
         default:
             return false;
@@ -2880,9 +2879,7 @@ bool llm_arch_is_hybrid(const llm_arch & arch) {
         case LLM_ARCH_LFM2MOE:
         case LLM_ARCH_NEMOTRON_H:
         case LLM_ARCH_QWEN3NEXT:
-        // Kimi: Currently using recurrent-only mode since MLA doesn't use KV cache
-        // TODO: Enable hybrid when MLA KV caching is implemented
-        // case LLM_ARCH_KIMI_LINEAR:
+        case LLM_ARCH_KIMI_LINEAR:
             return true;
         default:
             return false;
