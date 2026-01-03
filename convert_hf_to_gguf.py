@@ -4987,10 +4987,65 @@ class KimiLinearModel(TextModel):
     
     _experts: list[dict[str, Tensor]] | None = None
 
+    def set_vocab(self):
+        try:
+            self._set_vocab_gpt2()
+            return
+        except Exception:
+            pass
+
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(self.dir_model, trust_remote_code=True)
+        tokpre = self.get_vocab_base_pre(tokenizer)
+
+        if tokpre == "kimi-k2":
+            # Build merges list using the approach similar to HunYuanMoE
+            merges = []
+            vocab = {}
+            mergeable_ranks = tokenizer.model._mergeable_ranks
+            for token, rank in mergeable_ranks.items():
+                vocab[QwenModel.token_bytes_to_string(token)] = rank
+                if len(token) == 1:
+                    continue
+                merged = QwenModel.bpe(mergeable_ranks, token, max_rank=rank)
+                if len(merged) == 2:
+                    merges.append(' '.join(map(QwenModel.token_bytes_to_string, merged)))
+
+            # Build token list
+            vocab_size = self.hparams["vocab_size"]
+            special_tokens = tokenizer.special_tokens
+            reverse_vocab = {id_ : encoded_tok for encoded_tok, id_ in {**vocab, **special_tokens}.items()}
+            tokens: list[str] = []
+            toktypes: list[int] = []
+
+            for i in range(vocab_size):
+                if i not in reverse_vocab:
+                    tokens.append(f"[PAD{i}]")
+                    toktypes.append(gguf.TokenType.UNUSED)
+                else:
+                    token = reverse_vocab[i]
+                    tokens.append(token)
+                    if i in special_tokens.values():
+                        toktypes.append(gguf.TokenType.CONTROL)
+                    else:
+                        toktypes.append(gguf.TokenType.NORMAL)
+
+            self.gguf_writer.add_tokenizer_model("gpt2")
+            self.gguf_writer.add_tokenizer_pre(tokpre)
+            self.gguf_writer.add_token_list(tokens)
+            self.gguf_writer.add_token_types(toktypes)
+            self.gguf_writer.add_token_merges(merges)
+
+            special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=False)
+            special_vocab.add_to_gguf(self.gguf_writer)
+            # override eos id in config.json with tiktoken eos id
+            self.gguf_writer.add_eos_token_id(tokenizer.eos_id)
+        else:
+            raise NotImplementedError(f"Deepseek pre-tokenizer {tokpre!r} is not supported yet!")
+
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
         self.gguf_writer.add_vocab_size(self.hparams["vocab_size"])
-        self.gguf_writer.add_leading_dense_block_count(self.hparams["first_k_dense_replace"])
         self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
  
         # Use find_hparam for context length
@@ -5043,8 +5098,9 @@ class KimiLinearModel(TextModel):
         # Support HuggingFace naming: qk_nope_head_dim, qk_rope_head_dim, v_head_dim
         qk_nope_head_dim = self.hparams.get("qk_nope_head_dim")
         qk_rope_head_dim = self.hparams.get("qk_rope_head_dim")
+        self.gguf_writer.add_key_length(qk_nope_head_dim + qk_rope_head_dim)
         v_head_dim = self.hparams.get("v_head_dim")
-        self.gguf_writer.add_rope_dimension_count(self.hparams["qk_rope_head_dim"])
+        self.gguf_writer.add_value_length(v_head_dim)
         
         # Calculate n_embd_head_k_mla = qk_nope_head_dim + qk_rope_head_dim
         if "n_embd_head_k_mla" in self.hparams:
@@ -5105,60 +5161,6 @@ class KimiLinearModel(TextModel):
         routed_scaling_factor = self.hparams.get("routed_scaling_factor")
         if routed_scaling_factor is not None:
             self.gguf_writer.add_expert_weights_scale(routed_scaling_factor)
-
-    def set_vocab(self):
-        try:
-            self._set_vocab_gpt2()
-            return
-        except Exception:
-            pass
-
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(self.dir_model, trust_remote_code=True)
-        tokpre = self.get_vocab_base_pre(tokenizer)
-
-        if tokpre == "kimi-k2":
-            # Build merges list using the approach similar to HunYuanMoE
-            merges = []
-            vocab = {}
-            mergeable_ranks = tokenizer.model._mergeable_ranks
-            for token, rank in mergeable_ranks.items():
-                vocab[QwenModel.token_bytes_to_string(token)] = rank
-                if len(token) == 1:
-                    continue
-                merged = QwenModel.bpe(mergeable_ranks, token, max_rank=rank)
-                if len(merged) == 2:
-                    merges.append(' '.join(map(QwenModel.token_bytes_to_string, merged)))
-            
-            # Build token list
-            vocab_size = self.hparams["vocab_size"] 
-            special_tokens = tokenizer.special_tokens
-            reverse_vocab = {id_ : encoded_tok for encoded_tok, id_ in {**vocab, **special_tokens}.items()}    
-            tokens: list[str] = []
-            toktypes: list[int] = []
-
-            for i in range(vocab_size):
-                if i not in reverse_vocab:
-                    tokens.append(f"[PAD{i}]")
-                    toktypes.append(gguf.TokenType.UNUSED)
-                else:
-                    token = reverse_vocab[i]
-                    tokens.append(token)
-                    if i in special_tokens.values():
-                        toktypes.append(gguf.TokenType.CONTROL)
-                    else:
-                        toktypes.append(gguf.TokenType.NORMAL)
-
-            self.gguf_writer.add_tokenizer_model("gpt2")
-            self.gguf_writer.add_tokenizer_pre(tokpre)
-            self.gguf_writer.add_token_list(tokens)
-            self.gguf_writer.add_token_types(toktypes)
-            self.gguf_writer.add_token_merges(merges)
-
-            special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=False)
-            special_vocab.add_to_gguf(self.gguf_writer)
-        else:
-            raise NotImplementedError(f"Deepseek pre-tokenizer {tokpre!r} is not supported yet!")
 
     def prepare_tensors(self):
         super().prepare_tensors()
