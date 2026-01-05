@@ -1,6 +1,5 @@
 #include "models.h"
 #include "ggml.h"
-#include "llama-impl.h"
 
 #define CHUNK_SIZE 64
 
@@ -58,8 +57,6 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
         const auto & layer = model.layers[il];
         ggml_tensor * inpSA = inpL;
 
-        if (!layer.attn_norm)
-            LLAMA_LOG_INFO("Empty attn_norm at layer %d\n", il);
         // Attention Norm
         cur = build_norm(inpL, layer.attn_norm, NULL, LLM_NORM_RMS, il);
         cb(cur, "attn_norm", il);
