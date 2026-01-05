@@ -287,6 +287,27 @@ struct llm_build_kimi_linear : public llm_graph_context_mamba {
     llm_build_kimi_linear(const llama_model & model, const llm_graph_params & params);
 private:
     const llama_model & model;
+    ggml_tensor * build_kda_recurrent(
+                ggml_tensor * q,
+                ggml_tensor * k,
+                ggml_tensor * v,
+                ggml_tensor * g,
+                ggml_tensor * beta,
+                ggml_tensor * state,
+                ggml_tensor * causal_mask,
+                ggml_tensor * identity,
+                        int   il);
+
+    ggml_tensor * build_kda_chunking(
+                ggml_tensor * q,
+                ggml_tensor * k,
+                ggml_tensor * v,
+                ggml_tensor * g,
+                ggml_tensor * beta,
+                ggml_tensor * state,
+                ggml_tensor * causal_mask,
+                ggml_tensor * identity,
+                        int   il);
 };
 
 struct llm_build_lfm2 : public llm_graph_context {
