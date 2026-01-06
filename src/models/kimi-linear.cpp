@@ -263,7 +263,6 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
             ggml_tensor * state = build_rs(inp_rs, ssm_states_all, hparams.n_embd_s(), n_seqs);
             state = ggml_reshape_4d(ctx0, state, head_dim, head_dim, n_head, n_seqs);
             // Choose between build_kda_chunking and build_kda_recurrent based on n_tokens
-            // TODO: Currently only build_kda_recurrent is implemented
             ggml_tensor * attn_out = n_seq_tokens > CHUNK_SIZE ?
                 build_kda_chunking(Qcur, Kcur, Vcur, g1, beta, state, causal_mask, identity, il) : 
                 build_kda_recurrent(Qcur, Kcur, Vcur, g1, beta, state, causal_mask, identity, il);
@@ -315,7 +314,6 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
         } else if (is_mla) {
             // === MLA Layer (Multi-head Latent Attention) without KV Cache ===
             // Reference: vLLM mla.py
-            // TODO: Implement proper KV caching for MLA (requires custom cache format)
             
             // Step 1: Q projection and reshape
             // vLLM Kimi: q = q_proj(hidden_states), then view as [n_tokens, n_head, qk_head_dim]
@@ -454,7 +452,8 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
 }
 
 /*
-    IMPORTANT: Currently build_kda_chunking is not implemented nor called
+    This is a ggml implementation of the naive_chunk_kda function of
+    https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/kda/naive.py
 */
 ggml_tensor * llm_build_kimi_linear::build_kda_chunking(
         ggml_tensor * q,
