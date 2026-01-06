@@ -9,6 +9,11 @@ if (NOT MSVC)
 endif()
 
 target_link_libraries  (${TARGET} PRIVATE Threads::Threads)
+
+if (WIN32 AND NOT MSVC)
+    target_link_libraries(${TARGET} PRIVATE ws2_32)
+endif()
+
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
 target_compile_definitions(${TARGET} PRIVATE
@@ -143,5 +148,8 @@ if (CPPHTTPLIB_OPENSSL_SUPPORT)
         find_library(CORE_FOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
         find_library(SECURITY_FRAMEWORK Security REQUIRED)
         target_link_libraries(${TARGET} PUBLIC ${CORE_FOUNDATION_FRAMEWORK} ${SECURITY_FRAMEWORK})
+    endif()
+    if (WIN32 AND NOT MSVC)
+        target_link_libraries(${TARGET} PUBLIC crypt32)
     endif()
 endif()
