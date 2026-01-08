@@ -260,8 +260,8 @@
   <text x="80" y="1006" class="header" text-anchor="middle">CTX</text>
   <text x="160" y="1006" class="header" text-anchor="middle">TEST</text>
   <text x="300" y="1006" class="header" text-anchor="middle">VANILLA (KV F16) [tok/s]</text>
-  <text x="460" y="1006" class="header" text-anchor="middle">FORK (KV F16) [tok/s]</text>
-  <text x="620" y="1006" class="header" text-anchor="middle">FORK (K Q8_0, V F16) [tok/s]</text>
+  <text x="460" y="1006" class="header" text-anchor="middle">FORK 2512 (KV F16) [tok/s]</text>
+  <text x="620" y="1006" class="header" text-anchor="middle">FORK 2512 (K Q8_0, V F16) [tok/s]</text>
 
   <line x1="16" y1="1018" x2="704" y2="1018" class="grid" opacity="0.6"/>
 

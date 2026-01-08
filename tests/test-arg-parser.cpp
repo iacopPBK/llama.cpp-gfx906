@@ -1,10 +1,11 @@
 #include "arg.h"
 #include "common.h"
+#include "download.h"
 
-#include <string>
-#include <vector>
 #include <sstream>
+#include <string>
 #include <unordered_set>
+#include <vector>
 
 #undef NDEBUG
 #include <cassert>
