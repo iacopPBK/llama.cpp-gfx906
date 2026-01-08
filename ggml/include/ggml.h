@@ -551,6 +551,7 @@ extern "C" {
         GGML_OP_GATED_LINEAR_ATTN,
         GGML_OP_RWKV_WKV7,
         GGML_OP_SOLVE_TRI,
+        GGML_OP_DELTANET,
 
         GGML_OP_UNARY,
 
@@ -2438,6 +2439,18 @@ extern "C" {
             struct ggml_tensor  * a,
             struct ggml_tensor  * b,
             struct ggml_tensor  * state);
+
+    // Delta-Net linear attention (chunked, for Qwen3-Next)
+    // Inputs: K, V, Q, G, Beta, State
+    // Output: [output_flat; state_flat] concatenated
+    GGML_API struct ggml_tensor * ggml_deltanet(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * k,      // [S, n_tokens, H, n_seqs]
+            struct ggml_tensor  * v,      // [S, n_tokens, H, n_seqs]
+            struct ggml_tensor  * q,      // [S, n_tokens, H, n_seqs]
+            struct ggml_tensor  * g,      // [n_tokens, 1, H, n_seqs]
+            struct ggml_tensor  * beta,   // [1, n_tokens, H, n_seqs]
+            struct ggml_tensor  * state); // [S, S, H, n_seqs]
 
     /* Solves a specific equation of the form Ax=B, where A is a triangular matrix
     *  without zeroes on the diagonal (i.e. invertible).

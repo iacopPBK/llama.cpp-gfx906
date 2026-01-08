@@ -28,9 +28,6 @@ add_library(${HTP_LIB} SHARED
     softmax-ops.c
     act-ops.c
     rope-ops.c
-    flash-attn-ops.c
-    set-rows-ops.c
-    get-rows-ops.c
 )
 
 target_compile_definitions(${HTP_LIB} PRIVATE

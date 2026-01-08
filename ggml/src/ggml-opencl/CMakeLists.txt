@@ -57,7 +57,6 @@ set(GGML_OPENCL_KERNELS
     add
     add_id
     argsort
-    fill
     clamp
     cpy
     cvt
