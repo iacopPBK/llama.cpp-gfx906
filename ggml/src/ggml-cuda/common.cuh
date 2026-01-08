@@ -397,6 +397,35 @@ struct ggml_cuda_unroll<1> {
     }
 };
 
+// ================================================================================================
+// AMD GFX906 DPP-based Warp Reductions
+// ================================================================================================
+// All AMD GFX906-specific DPP optimizations moved to gfx906/gfx906-common.cuh
+// ================================================================================================
+
+#ifdef GGML_USE_HIP
+    #include "gfx906/gfx906-common.cuh"
+#endif // GGML_USE_HIP
+
+// ============================================================================
+// Unified shuffle XOR operation - dispatches to DPP on AMD, shuffle on NVIDIA
+// ============================================================================
+template<int width = WARP_SIZE, typename T>
+static __device__ __forceinline__ T ggml_cuda_shfl_xor_sync(T x, int offset) {
+#if defined(GGML_USE_HIP)
+    switch (~offset) {
+        case ~1:  return hip_dpp_xor1(x);
+        case ~2:  return hip_dpp_xor2(x);
+        case ~4:  return hip_dpp_xor4(x);
+        case ~8:  return hip_dpp_xor8(x);
+        case ~16: return hip_dpp_xor16(x);
+        default:  return __shfl_xor(x, offset, width);
+    }
+#else
+    return __shfl_xor_sync(0xffffffff, x, offset, width);
+#endif
+}
+
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ int warp_reduce_sum(int x) {
 #if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
@@ -404,7 +433,7 @@ static __device__ __forceinline__ int warp_reduce_sum(int x) {
 #else
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        x += __shfl_xor_sync(0xffffffff, x, offset, width);
+        x += ggml_cuda_shfl_xor_sync<width>(x, offset);
     }
     return x;
 #endif // !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
@@ -412,19 +441,23 @@ static __device__ __forceinline__ int warp_reduce_sum(int x) {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_sum(float x) {
+#if defined(GGML_USE_HIP)
+    return warp_reduce_amd_f32<width, AddOp>(x);  // Use fused DPP instructions
+#else
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        x += __shfl_xor_sync(0xffffffff, x, offset, width);
+        x += ggml_cuda_shfl_xor_sync<width>(x, offset);
     }
     return x;
+#endif
 }
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float2 warp_reduce_sum(float2 a) {
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        a.x += __shfl_xor_sync(0xffffffff, a.x, offset, width);
-        a.y += __shfl_xor_sync(0xffffffff, a.y, offset, width);
+        a.x += ggml_cuda_shfl_xor_sync<width>(a.x, offset);
+        a.y += ggml_cuda_shfl_xor_sync<width>(a.y, offset);
     }
     return a;
 }
@@ -434,10 +467,9 @@ static __device__ __forceinline__ half2 warp_reduce_sum(half2 a) {
 #ifdef FP16_AVAILABLE
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        a = __hadd2(a, __shfl_xor_sync(0xffffffff, a, offset, width));
+        a = __hadd2(a, ggml_cuda_shfl_xor_sync<width>(a, offset));
     }
     return a;
-
 #else
     NO_DEVICE_CODE;
     return a;
@@ -451,7 +483,7 @@ static __device__ __forceinline__ int warp_reduce_all(int x) {
     } else {
 #pragma unroll
         for (int offset = width/2; offset > 0; offset >>= 1) {
-            x = __shfl_xor_sync(0xffffffff, x, offset, width) && x;
+            x = ggml_cuda_shfl_xor_sync<width>(x, offset) && x;
         }
         return x;
     }
@@ -464,7 +496,7 @@ static __device__ __forceinline__ int warp_reduce_any(int x) {
     } else {
 #pragma unroll
         for (int offset = width/2; offset > 0; offset >>= 1) {
-            x = __shfl_xor_sync(0xffffffff, x, offset, width) || x;
+            x = ggml_cuda_shfl_xor_sync<width>(x, offset) || x;
         }
         return x;
     }
@@ -472,11 +504,15 @@ static __device__ __forceinline__ int warp_reduce_any(int x) {
 
 template<int width = WARP_SIZE>
 static __device__ __forceinline__ float warp_reduce_max(float x) {
+#if defined(GGML_USE_HIP)
+    return warp_reduce_amd_f32<width, MaxOp>(x);  // Use fused DPP instructions
+#else
 #pragma unroll
     for (int offset = width/2; offset > 0; offset >>= 1) {
-        x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, offset, width));
+        x = fmaxf(x, ggml_cuda_shfl_xor_sync<width>(x, offset));
     }
     return x;
+#endif
 }
 
 template<typename T, int width = WARP_SIZE>
@@ -560,7 +596,7 @@ static __device__ __forceinline__ half2 warp_reduce_max(half2 x) {
 #if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_PASCAL || defined(GGML_USE_HIP)
 #pragma unroll
    for (int offset = width/2; offset > 0; offset >>= 1) {
-       x = ggml_cuda_hmax2(x, __shfl_xor_sync(0xffffffff, x, offset, width));
+       x = ggml_cuda_hmax2(x, ggml_cuda_shfl_xor_sync<width>(x, offset));
    }
    return x;
 #else
@@ -700,6 +736,10 @@ static __device__ __forceinline__ float ggml_cuda_e8m0_to_fp32(uint8_t x) {
 #if CUDART_VERSION >= 12080
     const nv_bfloat16 e = __nv_cvt_e8m0_to_bf16raw(x);
     return (float) e;
+#elif defined(GGML_USE_HIP) && defined(__gfx906__)
+    // GFX906: Branchless with direct bit cast
+    const uint32_t bits = x ? ((uint32_t)x << 23) : 0x00400000u;
+    return __uint_as_float(bits);
 #else
     uint32_t bits;
     if (x == 0) {
@@ -1036,7 +1076,7 @@ struct ggml_tensor_extra_gpu {
 #define USE_CUDA_GRAPH
 #endif
 
-struct ggml_cuda_graph_node_properties {
+struct ggml_graph_node_properties {
     void * node_address;
     ggml_op node_op;
     int64_t ne[GGML_MAX_DIMS];
@@ -1061,25 +1101,10 @@ struct ggml_cuda_graph {
     std::vector<cudaGraphNode_t> nodes;
     bool disable_due_to_gpu_arch = false;
     bool disable_due_to_too_many_updates = false;
+    bool disable_due_to_failed_graph_capture = false;
     int number_consecutive_updates = 0;
-    std::vector<ggml_cuda_graph_node_properties> props;
-
-    void record_update(bool use_graph, bool update_required) {
-        if (use_graph && update_required) {
-            number_consecutive_updates++;
-        } else {
-            number_consecutive_updates = 0;
-        }
-        if (number_consecutive_updates >= 4) {
-            GGML_LOG_DEBUG("%s: disabling CUDA graphs due to too many consecutive updates\n", __func__);
-            disable_due_to_too_many_updates = true;
-        }
-    }
-
-    bool is_enabled() const {
-        static const bool disable_cuda_graphs_due_to_env = (getenv("GGML_CUDA_DISABLE_GRAPHS") != nullptr);
-        return !(disable_due_to_gpu_arch || disable_cuda_graphs_due_to_env || disable_due_to_too_many_updates);
-    }
+    bool cuda_graphs_enabled = false;
+    std::vector<ggml_graph_node_properties> ggml_graph_properties;
 #endif
 };
 

@@ -309,6 +309,13 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
     return true;
 #endif //GGML_CUDA_FORCE_MMQ
 
+#ifdef GGML_HIP_NO_HIPBLASLT
+    // When hipBLASLt is disabled, force MMQ for GCN (gfx900/gfx906) to avoid hipBLAS crashes
+    if (GGML_CUDA_CC_IS_GCN(cc)) {
+        return true;
+    }
+#endif //GGML_HIP_NO_HIPBLASLT
+
     if (GGML_CUDA_CC_IS_NVIDIA(cc)) {
         return !fp16_mma_hardware_available(cc) || ne11 < MMQ_DP4A_MAX_BATCH_SIZE;
     }
@@ -333,28 +340,6 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
     }
 
     if (amd_wmma_available(cc)) {
-        // RDNA 4 is consistently worse on rocblas
-        // https://github.com/ggml-org/llama.cpp/pull/18537#issuecomment-3706422301
-        if (GGML_CUDA_CC_IS_RDNA3(cc)) {
-            // High expert counts almost always better on MMQ
-            // due to a large amount of graph splits
-            // https://github.com/ggml-org/llama.cpp/pull/18202
-            if (n_experts >= 64) {
-                return true;
-            }
-
-            switch (type) {
-                // These quants are really bad on MMQ
-                case GGML_TYPE_Q2_K:
-                case GGML_TYPE_Q6_K:
-                // These quants are usually worse but not always
-                case GGML_TYPE_IQ2_XS:
-                case GGML_TYPE_IQ2_S:
-                    return ne11 <= 128;
-                default:
-                    return true;
-            }
-        }
         return true;
     }
 
