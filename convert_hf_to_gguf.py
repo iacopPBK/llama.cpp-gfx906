@@ -775,8 +775,8 @@ class TextModel(ModelBase):
 
         self.rope_parameters = self.hparams.get("rope_parameters", self.hparams.get("rope_scaling")) or {}
 
-        rope_theta = self.find_hparam(["rope_theta", "global_rope_theta", "rotary_emb_base"], optional=True)
-        local_rope_theta = self.find_hparam(["local_rope_theta", "rope_local_theta", "swa_rope_theta", "rope_local_base_freq"], optional=True)
+        rope_theta = self.find_hparam(["global_rope_theta", "rope_global_theta", "rope_theta_global", "rope_theta", "rotary_emb_base"], optional=True)
+        local_rope_theta = self.find_hparam(["local_rope_theta", "rope_local_theta", "rope_theta_local", "swa_rope_theta", "rope_local_base_freq"], optional=True)
 
         # Ensure "rope_theta" and "rope_type" is mirrored in rope_parameters
         if "full_attention" not in self.rope_parameters and "sliding_attention" not in self.rope_parameters:
@@ -11234,8 +11234,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--sentence-transformers-dense-modules", action="store_true",
-        help=("Whether to include sentence-transformers dense modules."
-              "It can be used for sentence-transformers models, like google/embeddinggemma-300m"
+        help=("Whether to include sentence-transformers dense modules. "
+              "It can be used for sentence-transformers models, like google/embeddinggemma-300m. "
               "Default these modules are not included.")
     )
 
