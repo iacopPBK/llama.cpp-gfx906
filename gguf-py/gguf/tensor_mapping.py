@@ -403,7 +403,7 @@ class TensorNameMap:
             "model.layers.{bid}.feed_forward.expert_bias",                  # lfm2moe
             "model.layers.{bid}.block_sparse_moe.e_score_correction",       # minimax-m2
             "backbone.layers.{bid}.mixer.gate.e_score_correction"           # nemotron-h-moe
-            "model.layers.{bid}.block_sparse_moe.gate.e_score_correction",  # kimi
+            "model.layers.{bid}.block_sparse_moe.gate.e_score_correction_bias",  # kimi
         ),
 
         # Feed-forward up
@@ -812,7 +812,7 @@ class TensorNameMap:
         ),
         MODEL_TENSOR.SSM_DT_B: (
             "model.layers.{bid}.self_attn.dt_bias",
-
+        ),
         MODEL_TENSOR.TIME_MIX_W0: (
             "model.layers.{bid}.attention.w0",            # rwkv7
         ),
