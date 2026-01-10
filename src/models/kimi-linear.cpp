@@ -576,10 +576,17 @@ ggml_tensor * llm_build_kimi_linear::build_kda_chunking(
     cb(gk_cumsum, "gk_cumsum", il);
 
 /*
+    Compute Akk and Aqk loop together
+    Akk loop:
     for i in range(BT):
         k_i = k[..., i, :] # k_i [B,H,NT,S]
         g_i = g[..., i:i+1, :] # g_i [B,H,NT,1,S]
         A[..., i] = torch.einsum('... c d, ... d -> ... c', k * (g - g_i).exp(), k_i)
+    Aqk loop:
+    for j in range(BT):
+        k_j = k[:, :, i, j]
+        g_j = g[:, :, i, j:j+1, :]
+        A[..., j] = torch.einsum('... c d, ... d -> ... c', q_i * (g_i - g_j).exp(), k_j)
 */
     const int64_t CHB = n_chunks * H_k * n_seqs;
     ggml_tensor * gkcs_i = ggml_reshape_4d(ctx0, gk_cumsum, chunk_size, 1, S_k, CHB);  // [chunk_size, 1, S_k, CHB] 
@@ -600,18 +607,26 @@ ggml_tensor * llm_build_kimi_linear::build_kda_chunking(
 
     ggml_tensor * k_i = ggml_cont(ctx0, ggml_reshape_4d(ctx0, k, S_k, chunk_size, 1, CHB));
     ggml_tensor * k_j = ggml_cont(ctx0, ggml_reshape_4d(ctx0, k, S_k, 1, chunk_size, CHB));
+    ggml_tensor * q_i = ggml_cont(ctx0, ggml_reshape_4d(ctx0, q, S_k, chunk_size, 1, CHB));
 
     ggml_tensor * decay_k_i = ggml_mul(ctx0, decay_mask, k_i);
+    ggml_tensor * decay_q_i = ggml_mul(ctx0, decay_mask, q_i);
 
     // decay_k_i [S.BT,BT,CHB] @ k_j [S,1,BT,CHB] = Akk [BT,1,BT,CHB]
-    ggml_tensor * Akk = ggml_mul_mat(ctx0, k_j, decay_k_i);
+    ggml_tensor * Akk = ggml_mul_mat(ctx0, decay_k_i, k_j);
+    ggml_tensor * Aqk = ggml_mul_mat(ctx0, decay_q_i, k_j);
     Akk = ggml_cont(ctx0, ggml_transpose(ctx0, ggml_reshape_4d(ctx0, Akk, chunk_size, chunk_size, n_chunks, HB)));
+    Aqk = ggml_cont(ctx0, ggml_transpose(ctx0, ggml_reshape_4d(ctx0, Aqk, chunk_size, chunk_size, n_chunks, HB)));
     cb(Akk, "Akk", il);
+    cb(Aqk, "Aqk", il);
             
     Akk = ggml_mul(ctx0, Akk, beta);
     Akk = ggml_neg(ctx0, ggml_mul(ctx0, Akk, causal_mask));
-
     cb(Akk, "attn_pre_solve", il);
+
+    Aqk = ggml_mul(ctx0, Aqk, diag_mask);
+    Aqk = ggml_scale(ctx0, Aqk, scale); // scale q
+    cb(Aqk, "Aqk_masked", il);
 
     // for i in range(1, chunk_size):
     //          row = attn[..., i, :i].clone()
@@ -648,16 +663,14 @@ ggml_tensor * llm_build_kimi_linear::build_kda_chunking(
 
     cb(new_state, "new_state", il);
 
-    // switch for chunkify_mask
-    decay_mask = ggml_cont(ctx0, ggml_reshape_4d(ctx0, decay_mask, S_k, chunk_size * chunk_size, n_chunks, HB));
     for (int64_t chunk = 0; chunk < n_chunks; chunk++) {
 // extract one chunk worth of data
         auto chunkify = [=](ggml_tensor * t) {
                     return ggml_cont(ctx0, ggml_view_4d(ctx0, t, t->ne[0], chunk_size, 1, t->ne[3],
                 t->nb[1], t->nb[2], t->nb[3], t->nb[2] * chunk));
         };
-        auto chunkify_mask = [=](ggml_tensor * t) {
-                    return ggml_cont(ctx0, ggml_view_4d(ctx0, t, t->ne[0], chunk_size*chunk_size, 1, t->ne[3],
+        auto chunkify_A = [=](ggml_tensor * t) {
+                    return ggml_cont(ctx0, ggml_view_4d(ctx0, t, chunk_size, chunk_size, 1, t->ne[3],
                 t->nb[1], t->nb[2], t->nb[3], t->nb[2] * chunk));
         };
 
@@ -671,27 +684,7 @@ ggml_tensor * llm_build_kimi_linear::build_kda_chunking(
         ggml_tensor * gk_cs_chunk = chunkify(gk_cumsum);
         ggml_tensor * k_cumdecay_chunk = chunkify(k_cumdecay);
         ggml_tensor * gkexp_chunk = ggml_exp(ctx0, gk_cs_chunk);
-        ggml_tensor * decay_mask_chunk = chunkify_mask(decay_mask);
-        decay_mask_chunk = ggml_cont(ctx0, ggml_reshape_4d(ctx0, decay_mask_chunk, S_k, chunk_size, chunk_size, HB));
-/*
-    https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/kda/naive.py
-
-        for j in range(BT):
-            k_j = k[:, :, i, j]
-            g_j = g[:, :, i, j:j+1, :]
-            A[..., j] = torch.einsum('... c d, ... d -> ... c', q_i * (g_i - g_j).exp(), k_j)
-*/
-        ggml_tensor * k_j_chunk = ggml_cont(ctx0, ggml_reshape_4d(ctx0, k_chunk, S_k, 1, chunk_size, HB));
-        ggml_tensor * q_i_chunk = ggml_cont(ctx0, ggml_reshape_4d(ctx0, q_chunk, S_k, chunk_size, 1, HB));
-        ggml_tensor * decay_q_i_chunk = ggml_mul(ctx0, decay_mask_chunk, q_i_chunk);
-
-        ggml_tensor * Aqk = ggml_mul_mat(ctx0, decay_q_i_chunk, k_j_chunk);
-        Aqk = ggml_cont(ctx0, ggml_transpose(ctx0, ggml_reshape_4d(ctx0, Aqk, chunk_size, chunk_size, 1, HB)));
-        cb(Aqk, "Aqk", il);
-
-        Aqk = ggml_mul(ctx0, Aqk, diag_mask);
-        Aqk = ggml_scale(ctx0, Aqk, scale); // scale q
-        cb(Aqk, "Aqk_masked", il);
+        ggml_tensor * Aqk_chunk = chunkify_A(Aqk);
 
         ggml_tensor * state_t = ggml_cont_4d(ctx0, ggml_permute(ctx0, new_state, 1, 0, 2, 3), S_v, S_v, 1, H_v * n_seqs);
 
@@ -712,7 +705,7 @@ ggml_tensor * llm_build_kimi_linear::build_kda_chunking(
 
         // v_new_t [S,BT,1,H*B] Aqk [BT,BT,1,H*B]
         // core_attn_out[:, :, i] = attn_inter + attn @ v_new or A' @ (U_[t] - W_[t]*S_[t])
-        ggml_tensor * v_attn = ggml_mul_mat(ctx0, v_new_t, Aqk);
+        ggml_tensor * v_attn = ggml_mul_mat(ctx0, v_new_t, Aqk_chunk);
 
         // o[:, :, i] = (q_i * g_i.exp()) @ S + A @ v_i
         ggml_tensor * core_attn_out_chunk = ggml_add(ctx0, attn_inter, v_attn);
