@@ -5159,7 +5159,6 @@ class KimiLinearModel(TextModel):
             self.gguf_writer.add_ssm_conv_kernel(ssm_d_conv)
 
         kda_head_dim = self.hparams.get("kda_head_dim") or linear_attn_config.get("head_dim")
-
         if kda_head_dim is not None:
             self.gguf_writer.add_kda_head_dim(kda_head_dim)
 
@@ -5328,11 +5327,7 @@ class KimiLinearModel(TextModel):
             kv_b = data_torch.view(n_head_kv, v_head_dim + qk_nope_head_dim, data_torch.shape[-1])
             k_b, v_b = torch.split(kv_b, [qk_nope_head_dim, v_head_dim], dim=1)
             k_b = k_b.transpose(1, 2)
-
-            return [
-                (self.map_tensor_name(name_kb), k_b),
-                (self.map_tensor_name(name_vb), v_b)
-            ]
+            return [(self.map_tensor_name(name_kb), k_b), (self.map_tensor_name(name_vb), v_b)]
 
         mapped_name = self.map_tensor_name(name)
         logger.info(f"Returning {mapped_name}: shape after = {tuple(data_torch.shape)}")
