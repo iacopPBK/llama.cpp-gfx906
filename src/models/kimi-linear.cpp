@@ -3,7 +3,8 @@
 
 #define CHUNK_SIZE 64
 
-llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const llm_graph_params & params) : llm_graph_context_mamba(params), model(model) {
+llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const llm_graph_params & params) :
+    llm_graph_context_mamba(params), model(model) {
     ggml_tensor * cur;
     ggml_tensor * inpL;
 
