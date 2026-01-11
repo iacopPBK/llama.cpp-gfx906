@@ -5138,7 +5138,7 @@ class KimiLinearModel(TextModel):
             # Default to 4096 if not found
             logger.warning("No context length found in config, defaulting to 4096")
             self.gguf_writer.add_context_length(4096)
-        
+
         # KDA & MLA params
         # Get ssm_d_conv from linear_attn_config.short_conv_kernel_size or ssm_d_conv
         linear_attn_config = self.hparams.get("linear_attn_config", {})
@@ -5156,23 +5156,23 @@ class KimiLinearModel(TextModel):
 
         ssm_d_conv = self.hparams.get("ssm_d_conv") or linear_attn_config.get("short_conv_kernel_size")
         if ssm_d_conv is not None:
-             self.gguf_writer.add_ssm_conv_kernel(ssm_d_conv)
+            self.gguf_writer.add_ssm_conv_kernel(ssm_d_conv)
 
         kda_head_dim = self.hparams.get("kda_head_dim") or linear_attn_config.get("head_dim")
 
         if kda_head_dim is not None:
-             self.gguf_writer.add_kda_head_dim(kda_head_dim)
-        
+            self.gguf_writer.add_kda_head_dim(kda_head_dim)
+
         # MLA params - use add_* methods that handle arch substitution
         # Support both HuggingFace naming (q_lora_rank, kv_lora_rank) and internal naming (n_lora_q, n_lora_kv)
         q_lora_rank = self.hparams.get("q_lora_rank", self.hparams.get("n_lora_q"))
         kv_lora_rank = self.hparams.get("kv_lora_rank", self.hparams.get("n_lora_kv"))
-        
+
         if q_lora_rank is not None:
-             self.gguf_writer.add_q_lora_rank(q_lora_rank)
+            self.gguf_writer.add_q_lora_rank(q_lora_rank)
         if kv_lora_rank is not None:
-             self.gguf_writer.add_kv_lora_rank(kv_lora_rank)
-        
+            self.gguf_writer.add_kv_lora_rank(kv_lora_rank)
+
         # MLA head dimensions
         # Support HuggingFace naming: qk_nope_head_dim, qk_rope_head_dim, v_head_dim
         qk_nope_head_dim = self.hparams.get("qk_nope_head_dim")
@@ -5182,28 +5182,27 @@ class KimiLinearModel(TextModel):
         self.gguf_writer.add_key_length(self.hparams["kv_lora_rank"] + self.hparams["qk_rope_head_dim"])
         self.gguf_writer.add_value_length(self.hparams["kv_lora_rank"])
 
-        
         # Calculate n_embd_head_k_mla = qk_nope_head_dim + qk_rope_head_dim
         if "n_embd_head_k_mla" in self.hparams:
-             self.gguf_writer.add_key_length_mla(self.hparams["n_embd_head_k_mla"])
+            self.gguf_writer.add_key_length_mla(self.hparams["n_embd_head_k_mla"])
         elif qk_nope_head_dim is not None and qk_rope_head_dim is not None:
-             n_embd_head_k_mla = qk_nope_head_dim + qk_rope_head_dim
-             self.gguf_writer.add_key_length_mla(n_embd_head_k_mla)
-        
+            n_embd_head_k_mla = qk_nope_head_dim + qk_rope_head_dim
+            self.gguf_writer.add_key_length_mla(n_embd_head_k_mla)
+
         # n_embd_head_v_mla = v_head_dim
         if "n_embd_head_v_mla" in self.hparams:
-             self.gguf_writer.add_value_length_mla(self.hparams["n_embd_head_v_mla"])
+            self.gguf_writer.add_value_length_mla(self.hparams["n_embd_head_v_mla"])
         elif v_head_dim is not None:
-             self.gguf_writer.add_value_length_mla(v_head_dim)
-        
+            self.gguf_writer.add_value_length_mla(v_head_dim)
+
         # Rotation - use qk_rope_head_dim for Kimi
         rope_dim = self.hparams.get("qk_rope_head_dim") or self.hparams.get("n_rot")
         if rope_dim is not None:
-             self.gguf_writer.add_rope_dimension_count(rope_dim)
+            self.gguf_writer.add_rope_dimension_count(rope_dim)
         else:
-             # Default to head_dim
-             head_dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
-             self.gguf_writer.add_rope_dimension_count(head_dim)
+            # Default to head_dim
+            head_dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
+            self.gguf_writer.add_rope_dimension_count(head_dim)
 
         # Copied from Qwen2Moe as this model inherits parts of it
         # YaRN is not enabled by default
@@ -5227,17 +5226,17 @@ class KimiLinearModel(TextModel):
         moe_intermediate_size = self.hparams.get("moe_intermediate_size")
         if moe_intermediate_size is not None:
             self.gguf_writer.add_expert_feed_forward_length(moe_intermediate_size)
-        
+
         # num_shared_experts (1 for Kimi)
         num_shared_experts = self.hparams.get("num_shared_experts")
         if num_shared_experts is not None:
             self.gguf_writer.add_expert_shared_count(num_shared_experts)
-        
+
         # first_k_dense_replace (1 for Kimi - first layer uses dense MLP)
         first_k_dense_replace = self.hparams.get("first_k_dense_replace")
         if first_k_dense_replace is not None:
             self.gguf_writer.add_leading_dense_block_count(first_k_dense_replace)
-        
+
         # Routed scaling factor (expert_weights_scale = 2.446 for Kimi)
         routed_scaling_factor = self.hparams.get("routed_scaling_factor")
         if routed_scaling_factor is not None:
@@ -5246,13 +5245,13 @@ class KimiLinearModel(TextModel):
     def prepare_tensors(self):
         super().prepare_tensors()
         if self._experts is not None:
-             experts = [k for d in self._experts for k in d.keys()]
-             if len(experts) > 0:
-                 raise ValueError(f"Unprocessed experts: {experts}")
+            experts = [k for d in self._experts for k in d.keys()]
+            if len(experts) > 0:
+                raise ValueError(f"Unprocessed experts: {experts}")
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         logger.info(f"Processing {name}: shape before = {tuple(data_torch.shape)}")
-        
+
         # Handle KDA conv1d weights
         # HuggingFace/vLLM stores as [d_inner, d_conv] (2D), memory layout: conv_step changes fastest
         # llama.cpp expects ggml ne = [d_conv, 1, d_inner, 1], memory layout: ne[0]=d_conv changes fastest
@@ -5271,7 +5270,7 @@ class KimiLinearModel(TextModel):
                 d_inner, _, d_conv = data_torch.shape
                 data_torch = data_torch.reshape(1, d_inner, 1, d_conv)
                 logger.info(f"Reshaped conv1d weight {name}: [d_inner={d_inner}, 1, d_conv={d_conv}] -> numpy {tuple(data_torch.shape)} -> ggml ne=[{d_conv}, 1, {d_inner}, 1]")
-        
+
         # Handle A_log: HF stores as [1, 1, num_heads, 1]
         # llama.cpp expects ggml ne = [1, num_heads, 1, 1]
         # GGUF reverses numpy shape: numpy (1, 1, num_heads, 1) -> ggml ne = [1, num_heads, 1, 1]
@@ -5279,11 +5278,11 @@ class KimiLinearModel(TextModel):
         if name.endswith(".A_log"):
             if data_torch.ndim == 4:
                 logger.info(f"A_log {name}: numpy {tuple(data_torch.shape)} -> ggml ne={list(reversed(data_torch.shape))}")
-        
+
         # Kimi specific bias
         if name.endswith("e_score_correction_bias"):
-             new_name = self.format_tensor_name(gguf.MODEL_TENSOR.FFN_EXP_PROBS_B, bid)
-             return [(new_name, data_torch)]
+            new_name = self.format_tensor_name(gguf.MODEL_TENSOR.FFN_EXP_PROBS_B, bid)
+            return [(new_name, data_torch)]
 
         # process the experts separately
         if name.find("block_sparse_moe.experts") != -1:
