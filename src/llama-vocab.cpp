@@ -1747,7 +1747,7 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
             const int merges_keyidx = gguf_find_key(ctx, kv(LLM_KV_TOKENIZER_MERGES).c_str());
             // Kimi-K2 uses custom tokenization without traditional BPE merges
             const bool is_kimi_k2 = (tokenizer_pre == "kimi-k2");
-            
+
             if (merges_keyidx == -1) {
                 if (!is_kimi_k2) {
                     throw std::runtime_error("cannot find tokenizer merges in model file\n");
@@ -1768,7 +1768,7 @@ void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
                     if (pos != std::string::npos) {
                         first  = word.substr(0, pos);
                         second = word.substr(pos + 1);
-                    } 
+                    }
 
                     bpe_ranks.emplace(std::make_pair(first, second), i);
                 }
