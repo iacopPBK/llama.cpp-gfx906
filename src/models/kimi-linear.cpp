@@ -410,7 +410,7 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
                 // Use build_attn with inp_attn for proper mask handling
                 cur = build_attn(inp_attn, layer.wo, NULL, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale_mla, il);
                 cb(cur, "mla_out", il);
-            }    
+            }
         } else {
             // Unknown layer type - this should not happen
             GGML_ABORT("Kimi layer is neither KDA nor MLA - missing required tensors");
@@ -628,7 +628,7 @@ ggml_tensor * llm_build_kimi_linear::build_kda_chunking(
         A[..., j] = torch.einsum('... c d, ... d -> ... c', q_i * (g_i - g_j).exp(), k_j)
 */
     const int64_t CHB = n_chunks * H_k * n_seqs;
-    ggml_tensor * gkcs_i = ggml_reshape_4d(ctx0, gk_cumsum, chunk_size, 1, S_k, CHB);  // [chunk_size, 1, S_k, CHB] 
+    ggml_tensor * gkcs_i = ggml_reshape_4d(ctx0, gk_cumsum, chunk_size, 1, S_k, CHB);  // [chunk_size, 1, S_k, CHB]
     ggml_tensor * gkcs_j = ggml_reshape_4d(ctx0, gkcs_i, 1, chunk_size, S_k, CHB);  // [1, chunk_size, S_k, CHB]
 
     ggml_tensor * gkcs_j_bc = ggml_repeat_4d(ctx0, gkcs_j, chunk_size, chunk_size, S_k, CHB);  // [1, chunk_size, S_k, CHB] -> [chunk_size, chunk_size, S_k, CHB]
@@ -787,7 +787,7 @@ ggml_tensor * llm_build_kimi_linear::build_kda_chunking(
     return ggml_concat(ctx0, flat_output, flat_state, 0);
 }
 
-ggml_tensor * llm_build_kimi_linear::build_kda_autoregressive( 
+ggml_tensor * llm_build_kimi_linear::build_kda_autoregressive(
     ggml_tensor * q,
     ggml_tensor * k,
     ggml_tensor * v,
