@@ -2312,6 +2312,8 @@ static std::set<llm_tensor> llm_get_tensor_names(llm_arch arch) {
                 LLM_TENSOR_ATTN_Q_A_NORM,
                 LLM_TENSOR_ATTN_KV_A_MQA,
                 LLM_TENSOR_ATTN_KV_B,
+                LLM_TENSOR_ATTN_K_B,
+                LLM_TENSOR_ATTN_V_B,
                 LLM_TENSOR_ATTN_KV_A_NORM,
             };
         default:

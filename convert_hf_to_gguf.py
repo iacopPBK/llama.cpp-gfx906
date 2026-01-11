@@ -5118,6 +5118,9 @@ class KimiLinearModel(TextModel):
             raise NotImplementedError(f"Deepseek pre-tokenizer {tokpre!r} is not supported yet!")
 
     def set_gguf_parameters(self):
+        # note: To enable MLA KV cache, attention needs to be converted into MQA (ie: GQA with 1 group)
+        self.hparams["num_key_value_heads"] = 1
+
         super().set_gguf_parameters()
         self.gguf_writer.add_vocab_size(self.hparams["vocab_size"])
         self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
@@ -5141,7 +5144,7 @@ class KimiLinearModel(TextModel):
         _full_attn_layers = linear_attn_config["full_attn_layers"]
         for il in range(self.hparams["num_hidden_layers"]):
             if il+1 in _full_attn_layers:
-                _num_kv_heads.append(linear_attn_config["num_heads"])
+                _num_kv_heads.append(self.hparams["num_key_value_heads"])
             else:
                 _num_kv_heads.append(0)
         assert(len(_num_kv_heads) == self.hparams["num_hidden_layers"])
@@ -5157,8 +5160,6 @@ class KimiLinearModel(TextModel):
              self.gguf_writer.add_kda_head_dim(kda_head_dim)
         
         # MLA params - use add_* methods that handle arch substitution
-        
-        # MLA params - use add_* methods that handle arch substitution
         # Support both HuggingFace naming (q_lora_rank, kv_lora_rank) and internal naming (n_lora_q, n_lora_kv)
         q_lora_rank = self.hparams.get("q_lora_rank", self.hparams.get("n_lora_q"))
         kv_lora_rank = self.hparams.get("kv_lora_rank", self.hparams.get("n_lora_kv"))
@@ -5172,9 +5173,11 @@ class KimiLinearModel(TextModel):
         # Support HuggingFace naming: qk_nope_head_dim, qk_rope_head_dim, v_head_dim
         qk_nope_head_dim = self.hparams.get("qk_nope_head_dim")
         qk_rope_head_dim = self.hparams.get("qk_rope_head_dim")
-        self.gguf_writer.add_key_length(qk_nope_head_dim + qk_rope_head_dim)
         v_head_dim = self.hparams.get("v_head_dim")
-        self.gguf_writer.add_value_length(v_head_dim)
+        # To enable MLA KV cache, MLA needs to be converted into MQA with larger heads, then decompresses to MHA
+        self.gguf_writer.add_key_length(self.hparams["kv_lora_rank"] + self.hparams["qk_rope_head_dim"])
+        self.gguf_writer.add_value_length(self.hparams["kv_lora_rank"])
+
         
         # Calculate n_embd_head_k_mla = qk_nope_head_dim + qk_rope_head_dim
         if "n_embd_head_k_mla" in self.hparams:
@@ -5315,6 +5318,7 @@ class KimiLinearModel(TextModel):
             n_head_kv = self.hparams["num_key_value_heads"]
             v_head_dim = self.hparams["v_head_dim"]
             qk_nope_head_dim = self.hparams["qk_nope_head_dim"]
+            logger.info("Split kv_b n_head_kv %d\n" % n_head_kv)
 
             assert data_torch.shape[0] == n_head_kv * (v_head_dim + qk_nope_head_dim)
 
