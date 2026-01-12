@@ -5146,11 +5146,11 @@ class KimiLinearModel(TextModel):
         _num_kv_heads = list()
         _full_attn_layers = linear_attn_config["full_attn_layers"]
         for il in range(self.hparams["num_hidden_layers"]):
-            if il+1 in _full_attn_layers:
+            if il + 1 in _full_attn_layers:
                 _num_kv_heads.append(self.hparams["num_key_value_heads"])
             else:
                 _num_kv_heads.append(0)
-        assert(len(_num_kv_heads) == self.hparams["num_hidden_layers"])
+        assert len(_num_kv_heads) == self.hparams["num_hidden_layers"]
         self.gguf_writer.add_head_count_kv(_num_kv_heads)
 
         ssm_d_conv = self.hparams.get("ssm_d_conv") or linear_attn_config.get("short_conv_kernel_size")
@@ -5327,6 +5327,7 @@ class KimiLinearModel(TextModel):
         mapped_name = self.map_tensor_name(name)
         logger.info(f"Returning {mapped_name}: shape after = {tuple(data_torch.shape)}")
         return [(mapped_name, data_torch)]
+
 
 @ModelBase.register("InternLM2ForCausalLM")
 class InternLM2Model(TextModel):
