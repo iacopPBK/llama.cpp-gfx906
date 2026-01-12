@@ -5062,7 +5062,7 @@ class CodeShellModel(TextModel):
 class KimiLinearModel(TextModel):
     """Kimi-Linear model with hybrid MLA+KDA architecture"""
     model_arch = gguf.MODEL_ARCH.KIMI_LINEAR
-    
+
     _experts: list[dict[str, Tensor]] | None = None
 
     def set_vocab(self):
@@ -5127,7 +5127,7 @@ class KimiLinearModel(TextModel):
         super().set_gguf_parameters()
         self.gguf_writer.add_vocab_size(self.hparams["vocab_size"])
         self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
- 
+
         # Use find_hparam for context length
         # Kimi uses model_max_length
         n_ctx = self.find_hparam(["max_position_embeddings", "model_max_length", "n_ctx", "n_positions"], optional=True)
@@ -5156,7 +5156,6 @@ class KimiLinearModel(TextModel):
         ssm_d_conv = self.hparams.get("ssm_d_conv") or linear_attn_config.get("short_conv_kernel_size")
         if ssm_d_conv is not None:
             self.gguf_writer.add_ssm_conv_kernel(ssm_d_conv)
-
         kda_head_dim = self.hparams.get("kda_head_dim") or linear_attn_config.get("head_dim")
         if kda_head_dim is not None:
             self.gguf_writer.add_kda_head_dim(kda_head_dim)
@@ -5296,8 +5295,8 @@ class KimiLinearModel(TextModel):
                 # merge the experts into a single 3d tensor
                 tensors = []
                 # w1: gate, w2: down, w3: up
-                for wid, tname in [("w1", gguf.MODEL_TENSOR.FFN_GATE_EXP), 
-                                   ("w2", gguf.MODEL_TENSOR.FFN_DOWN_EXP), 
+                for wid, tname in [("w1", gguf.MODEL_TENSOR.FFN_GATE_EXP),
+                                   ("w2", gguf.MODEL_TENSOR.FFN_DOWN_EXP),
                                    ("w3", gguf.MODEL_TENSOR.FFN_UP_EXP)]:
                     datas: list[Tensor] = []
                     for xid in range(n_experts):
