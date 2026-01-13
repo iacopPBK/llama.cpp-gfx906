@@ -340,7 +340,7 @@ struct common_params {
     int32_t fit_params_min_ctx = 4096; // minimum context size to set when trying to reduce memory use
 
     // margin per device in bytes for fitting parameters to free memory:
-    std::vector<size_t> fit_params_target = std::vector<size_t>(llama_max_devices(), 1024 * 1024*1024);
+    size_t fit_params_target = 1024 * 1024 * 1024;
 
     enum llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER; // how to split the model across GPUs
 
