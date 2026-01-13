@@ -134,12 +134,7 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
             ggml_tensor * conv_weight = nullptr;
             if (layer.ssm_q_conv) {
                 // Reshape conv weight from [d_conv, 1, d_inner, 1] to [d_conv, d_inner] for ggml_ssm_conv
-                // Cast to F32 if quantized (ggml_ssm_conv requires float weights)
-                ggml_tensor * q_conv_f32 = layer.ssm_q_conv;
-                if (q_conv_f32->type != GGML_TYPE_F32) {
-                    q_conv_f32 = ggml_cast(ctx0, q_conv_f32, GGML_TYPE_F32);
-                }
-                conv_weight = ggml_reshape_2d(ctx0, q_conv_f32, d_conv, d_inner);
+                conv_weight = ggml_reshape_2d(ctx0, layer.ssm_q_conv, d_conv, d_inner);
             }
 
             // Apply conv1d
@@ -166,7 +161,7 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
             ggml_tensor * Kcur;
             if (layer.ssm_k_conv) {
                 ggml_tensor * k_3d = ggml_reshape_3d(ctx0, k_proj, d_inner, n_seq_tokens, n_seqs);
-                ggml_tensor * conv_k = ggml_cont(ctx0, ggml_concat(ctx0, conv_state_k, ggml_transpose(ctx0, k_3d), 0));
+                ggml_tensor * conv_k = ggml_concat(ctx0, conv_state_k, ggml_transpose(ctx0, k_3d), 0);
 
                 // Save K conv state
                 ggml_tensor * last_conv_k = ggml_view_3d(ctx0, conv_k, d_conv - 1, d_inner, n_seqs,
@@ -176,11 +171,7 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
                         ggml_view_1d(ctx0, conv_states_all, conv_state_size * n_seqs,
                             (kv_head * n_embd_r_total + conv_state_size) * ggml_element_size(conv_states_all))));
 
-                ggml_tensor * k_conv_f32 = layer.ssm_k_conv;
-                if (k_conv_f32->type != GGML_TYPE_F32) {
-                    k_conv_f32 = ggml_cast(ctx0, k_conv_f32, GGML_TYPE_F32);
-                }
-                ggml_tensor * k_conv_weight = ggml_reshape_2d(ctx0, k_conv_f32, d_conv, d_inner);
+                ggml_tensor * k_conv_weight = ggml_reshape_2d(ctx0, layer.ssm_k_conv, d_conv, d_inner);
                 Kcur = ggml_ssm_conv(ctx0, conv_k, k_conv_weight);
                 cb(Kcur, "K conv1d", il);
                 Kcur = ggml_reshape_2d(ctx0, Kcur, d_inner, n_tokens);
@@ -197,7 +188,7 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
             ggml_tensor * Vcur;
             if (layer.ssm_v_conv) {
                 ggml_tensor * v_3d = ggml_reshape_3d(ctx0, v_proj, d_inner, n_seq_tokens, n_seqs);
-                ggml_tensor * conv_v = ggml_cont(ctx0, ggml_concat(ctx0, conv_state_v, ggml_transpose(ctx0, v_3d), 0));
+                ggml_tensor * conv_v = ggml_concat(ctx0, conv_state_v, ggml_transpose(ctx0, v_3d), 0);
 
                 // Save V conv state
                 ggml_tensor * last_conv_v = ggml_view_3d(ctx0, conv_v, d_conv - 1, d_inner, n_seqs,
@@ -207,11 +198,7 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
                         ggml_view_1d(ctx0, conv_states_all, conv_state_size * n_seqs,
                             (kv_head * n_embd_r_total + 2 * conv_state_size) * ggml_element_size(conv_states_all))));
 
-                ggml_tensor * v_conv_f32 = layer.ssm_v_conv;
-                if (v_conv_f32->type != GGML_TYPE_F32) {
-                    v_conv_f32 = ggml_cast(ctx0, v_conv_f32, GGML_TYPE_F32);
-                }
-                ggml_tensor * v_conv_weight = ggml_reshape_2d(ctx0, v_conv_f32, d_conv, d_inner);
+                ggml_tensor * v_conv_weight = ggml_reshape_2d(ctx0, layer.ssm_v_conv, d_conv, d_inner);
                 Vcur = ggml_ssm_conv(ctx0, conv_v, v_conv_weight);
                 cb(Vcur, "V conv1d", il);
                 Vcur = ggml_reshape_2d(ctx0, Vcur, d_inner, n_tokens);
@@ -243,17 +230,17 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
 
             // Step 4: Compute beta (mixing coefficient)
             ggml_tensor * beta = ggml_mul_mat(ctx0, layer.ssm_beta, cur);
-            beta = ggml_cont_4d(ctx0, beta, n_head, 1, n_seq_tokens, n_seqs);
+            beta = ggml_reshape_4d(ctx0, beta, n_head, 1, n_seq_tokens, n_seqs);
             cb(beta, "kda_beta", il);
 
             // Step 5: Reshape for KDA recurrence
             // {n_embd, n_tokens} -> {n_embd, n_seq_tokens, n_seqs}
             cur = ggml_reshape_3d(ctx0, cur, cur->ne[0], n_seq_tokens, n_seqs);
 
-            Qcur = ggml_cont(ctx0, ggml_reshape_4d(ctx0, Qcur, head_dim, n_head, n_seq_tokens, n_seqs));
-            Kcur = ggml_cont(ctx0, ggml_reshape_4d(ctx0, Kcur, head_dim, n_head, n_seq_tokens, n_seqs));
-            Vcur = ggml_cont(ctx0, ggml_reshape_4d(ctx0, Vcur, head_dim, n_head, n_seq_tokens, n_seqs));
-            g1 = ggml_cont(ctx0, ggml_reshape_4d(ctx0, g1, head_dim, n_head, n_seq_tokens, n_seqs));
+            Qcur = ggml_reshape_4d(ctx0, Qcur, head_dim, n_head, n_seq_tokens, n_seqs);
+            Kcur = ggml_reshape_4d(ctx0, Kcur, head_dim, n_head, n_seq_tokens, n_seqs);
+            Vcur = ggml_reshape_4d(ctx0, Vcur, head_dim, n_head, n_seq_tokens, n_seqs);
+            g1 = ggml_reshape_4d(ctx0, g1, head_dim, n_head, n_seq_tokens, n_seqs);
             cb(Qcur, "kda_Q", il);
             cb(Kcur, "kda_K", il);
             cb(Vcur, "kda_V", il);
