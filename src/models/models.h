@@ -286,7 +286,7 @@ struct llm_build_jamba : public llm_graph_context_mamba {
 
 struct llm_build_kimi_linear : public llm_graph_context_mamba {
     llm_build_kimi_linear(const llama_model & model, const llm_graph_params & params);
-private:
+
     std::pair<ggml_tensor *, ggml_tensor *> build_kda_autoregressive(
                 ggml_tensor * q,
                 ggml_tensor * k,
@@ -493,7 +493,8 @@ private:
                 ggml_tensor * cur,
                         int   il);
 
-    ggml_tensor * build_delta_net_chunking(
+    // returns pair of output and new state
+    std::pair<ggml_tensor *, ggml_tensor *> build_delta_net_chunking(
                 ggml_tensor * q,
                 ggml_tensor * k,
                 ggml_tensor * v,
@@ -505,7 +506,8 @@ private:
                 ggml_tensor * diag_mask,
                         int   il);
 
-    ggml_tensor * build_delta_net_autoregressive(
+    // returns pair of output and new state
+    std::pair<ggml_tensor *, ggml_tensor *> build_delta_net_autoregressive(
                 ggml_tensor * q,
                 ggml_tensor * k,
                 ggml_tensor * v,
@@ -519,6 +521,11 @@ private:
                 ggml_tensor * weights,
                 ggml_tensor * gate,
                         int   layer);
+
+    // returns pair of qkv, z
+    std::pair<ggml_tensor *, ggml_tensor *> build_qkvz(
+                ggml_tensor * input,
+                        int   il);
 
     const llama_model & model;
 };
