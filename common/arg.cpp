@@ -1295,7 +1295,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params) {
             params.kv_unified = true;
         }
-    ).set_env("LLAMA_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_PERPLEXITY}));
+    ).set_env("LLAMA_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_BATCHED}));
     add_opt(common_arg(
         {"--context-shift"},
         {"--no-context-shift"},
@@ -2878,9 +2878,17 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_THREADS_HTTP"));
     add_opt(common_arg(
+        {"--cache-prompt"},
+        {"--no-cache-prompt"},
+        string_format("whether to enable prompt caching (default: %s)", params.cache_prompt ? "enabled" : "disabled"),
+        [](common_params & params, bool value) {
+            params.cache_prompt = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CACHE_PROMPT"));
+    add_opt(common_arg(
         {"--cache-reuse"}, "N",
         string_format(
-            "min chunk size to attempt reusing from the cache via KV shifting (default: %d)\n"
+            "min chunk size to attempt reusing from the cache via KV shifting, requires prompt caching to be enabled (default: %d)\n"
             "[(card)](https://ggml.ai/f0.png)", params.n_cache_reuse
         ),
         [](common_params & params, int value) {
