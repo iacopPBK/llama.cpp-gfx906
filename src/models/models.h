@@ -286,7 +286,7 @@ struct llm_build_jamba : public llm_graph_context_mamba {
 
 struct llm_build_kimi_linear : public llm_graph_context_mamba {
     llm_build_kimi_linear(const llama_model & model, const llm_graph_params & params);
-private:
+
     std::pair<ggml_tensor *, ggml_tensor *> build_kda_autoregressive(
                 ggml_tensor * q,
                 ggml_tensor * k,
