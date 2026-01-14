@@ -144,7 +144,6 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
             ggml_tensor * Kcur = causal_conv1d(gf, ctx0, conv_states_all, conv_state_all, 1, cur, layer.wk, layer.ssm_k_conv, layer.ssm_k_conv_b, d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, kv_head);
             ggml_tensor * Vcur = causal_conv1d(gf, ctx0, conv_states_all, conv_state_all, 2, cur, layer.wv, layer.ssm_v_conv, layer.ssm_v_conv_b, d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, kv_head);
 
-            // Step 3: Compute g1 (forget gate)
             // g1 = -exp(A_log) * softplus(f_b(f_a(x)) + dt_bias)
             ggml_tensor * f_a = ggml_mul_mat(ctx0, layer.ssm_f_a, cur);
             ggml_tensor * g1 = ggml_mul_mat(ctx0, layer.ssm_f_b, f_a);
@@ -161,18 +160,18 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
             g1 = ggml_mul(ctx0, g1, A_neg_exp);
             cb(g1, "kda_g1", il);
 
-            // Step 4: Compute beta (mixing coefficient)
+            // Compute beta (mixing coefficient)
             ggml_tensor * beta = ggml_mul_mat(ctx0, layer.ssm_beta, cur);
             beta = ggml_reshape_4d(ctx0, beta, n_head, 1, n_seq_tokens, n_seqs);
             cb(beta, "kda_beta", il);
 
-            // Step 5: Reshape for KDA recurrence
+            // Reshape for KDA recurrence
             // {n_embd, n_tokens} -> {n_embd, n_seq_tokens, n_seqs}
             cur = ggml_reshape_3d(ctx0, cur, cur->ne[0], n_seq_tokens, n_seqs);
 
             g1 = ggml_reshape_4d(ctx0, g1, head_dim, n_head, n_seq_tokens, n_seqs);
 
-            // Step 6: Get SSM state and compute KDA recurrence using ggml_kda_scan
+            // Get SSM state and compute KDA recurrence using ggml_kda_scan
             ggml_tensor * ssm_states_all = mctx_cur->get_s_l(il);
             ggml_tensor * state = build_rs(inp_rs, ssm_states_all, hparams.n_embd_s(), n_seqs);
             state = ggml_reshape_4d(ctx0, state, head_dim, head_dim, n_head, n_seqs);
@@ -192,14 +191,14 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
                                               ggml_view_1d(ctx0, ssm_states_all, hparams.n_embd_s() * n_seqs,
                                                            kv_head * hparams.n_embd_s() * ggml_element_size(ssm_states_all))));
 
-            // Step 7: Output gating g2 = g_b(g_a(x))
+            // Output gating g2 = g_b(g_a(x))
             ggml_tensor * cur_2d = ggml_reshape_2d(ctx0, cur, cur->ne[0], n_seq_tokens * n_seqs);
             ggml_tensor * g_a = ggml_mul_mat(ctx0, layer.ssm_g_a, cur_2d);
             ggml_tensor * g2 = ggml_mul_mat(ctx0, layer.ssm_g_b, g_a);
             cb(g2, "g2 g_b(g_a(cur_2d))", il);
             g2 = ggml_reshape_3d(ctx0, g2, head_dim, n_head, n_seq_tokens * n_seqs);
 
-            // Step 8: Apply o_norm with sigmoid gating
+            // Apply o_norm with sigmoid gating
             // Note: Kimi model uses sigmoid gating, not SiLU (despite FusedRMSNormGated default being swish)
             // Formula: output = RMSNorm(x) * sigmoid(g)
             ggml_tensor * attn_out_final = ggml_reshape_3d(ctx0, output, head_dim, n_head,  n_seq_tokens * n_seqs);
@@ -208,7 +207,7 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
             ggml_tensor * gate = ggml_sigmoid(ctx0, g2);
             ggml_tensor * gated = ggml_mul(ctx0, normed, gate);
 
-            // Step 9: Output projection
+            // Output projection
             gated = ggml_cont_2d(ctx0, gated, d_inner, n_tokens);
             cur = ggml_mul_mat(ctx0, layer.wo, gated);
             cb(cur, "kda_out", il);
