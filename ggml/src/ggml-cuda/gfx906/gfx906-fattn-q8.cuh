@@ -1,5 +1,5 @@
 // Flash Attention with Q8_0 quantized KV cache for GFX906
-// Uses v_dot4_i32_i8 for INT8 dot products, +16 LDS padding to avoid bank conflicts
+// Uses v_dot4_i32_i8 for INT8 dot products
 
 #include "../common.cuh"
 #include "../fattn-common.cuh"
@@ -155,7 +155,7 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_load_tile(
     ggml_cuda_unroll<7>{}(load);
 }
 
-template<int warp_size, int nwarps, int I, int J, int K_row_stride, int J_padding, bool oob_check>
+template<int warp_size, int nwarps, int I, int J, int K_row_stride, bool oob_check>
 static __device__ __forceinline__ void flash_attn_tile_q8_q8_load_tile_q8(
         const block_q8_0 * const __restrict__ K_q8,
         int8_t * const __restrict__ K_values,
@@ -193,12 +193,11 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_load_tile_q8(
     }
 }
 
-template<int nthreads, int ncols, int ncols2, int DKQ, int DKQp, int cpw, int np, int cpy_ne>
+template<int nthreads, int ncols, int ncols2, int DKQ>
 static __device__ __forceinline__ void flash_attn_tile_q8_quantize_Q_to_shared(
         const float * __restrict__ Q_f,
         int8_t * __restrict__ Q_values,
         half * __restrict__ Q_scales,
-        half * __restrict__ Q_sums,
         const int col_Q_0,
         const int ne01,
         const int32_t nb01,
@@ -227,25 +226,24 @@ static __device__ __forceinline__ void flash_attn_tile_q8_quantize_Q_to_shared(
 
         const int base_offset = c*(nb02/sizeof(float)) + j*(nb01/sizeof(float)) + block_start;
 
+        // Use float4 vectorized loads for better memory bandwidth (8x float4 = 32 floats)
+        // DKQ is always multiple of 32 (static_assert at line 622), so no bounds check needed
+        const float4* Q_f4 = reinterpret_cast<const float4*>(Q_f + base_offset);
+        float4* Q_vals4 = reinterpret_cast<float4*>(Q_vals);
+
         #pragma unroll
-        for (int i = 0; i < QK8_0; i++) {
-            if (block_start + i < DKQ) {
-                Q_vals[i] = Q_f[base_offset + i] * scale;
-            } else {
-                Q_vals[i] = 0.0f;
-            }
+        for (int i = 0; i < QK8_0/4; i++) {
+            float4 tmp = Q_f4[i];
+            tmp.x *= scale;
+            tmp.y *= scale;
+            tmp.z *= scale;
+            tmp.w *= scale;
+            Q_vals4[i] = tmp;
         }
 
         quantize_f32_q8_0_block(Q_vals, &Q_block);
 
         Q_scales[col_block * ncols + jc] = Q_block.d;
-
-        int block_sum = 0;
-        #pragma unroll
-        for (int i = 0; i < QK8_0; i++) {
-            block_sum += Q_block.qs[i];
-        }
-        Q_sums[col_block * ncols + jc] = __int2half_rn(block_sum);
 
         int8_t * dst = Q_values + jc * DKQ + col_block * 32;
         const int4* src_int4 = (const int4*)Q_block.qs;
@@ -259,11 +257,10 @@ static __device__ __forceinline__ void flash_attn_tile_q8_quantize_Q_to_shared(
 }
 
 template <int warp_size, int nwarps, int ncols1, int ncols2, int DKQ, int nbatch_fa, int nbatch_K,
-    bool use_logit_softcap, bool oob_check>
+    bool oob_check>
 static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter_KQ(
         int8_t * const Q_values,
         half * const Q_scales,
-        half * const Q_sums,
         const block_q8_0 * const __restrict__ K_q8,
         int8_t * const K_values,
         half * const K_scales,
@@ -272,23 +269,19 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter_KQ(
         const int k_VKQ_sup,
         const int k_KQ_0,
         float * KQ_acc) {
-    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
-    constexpr int cpy_ne = cpy_nb / 4;
-
     constexpr int ncols = ncols1*ncols2;
     constexpr int cpw   = ncols > nwarps ? ncols/nwarps : 1;
     constexpr int np    = nwarps > ncols ? nwarps/ncols : 1;
 
     constexpr int K_row_stride = nbatch_K + 16;
 
-    flash_attn_tile_q8_q8_load_tile_q8<warp_size, nwarps, nbatch_fa, nbatch_K, K_row_stride, cpy_ne, oob_check>
+    flash_attn_tile_q8_q8_load_tile_q8<warp_size, nwarps, nbatch_fa, nbatch_K, K_row_stride, oob_check>
         (K_q8 + int64_t(k_VKQ_0)*stride_K_q8 + (k_KQ_0/32), K_values, K_scales, stride_K_q8, k_VKQ_sup);
     __syncthreads();
 
     static_assert(nbatch_K % 4 == 0, "nbatch_K must be multiple of 4 for sdot4");
 
     constexpr int blocks_per_K_row = nbatch_K / 32;
-    constexpr int blocks_per_Q_col = DKQ / 32;
 
     #pragma unroll 4
     for (int jc0 = 0; jc0 < cpw; ++jc0) {
@@ -307,28 +300,36 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter_KQ(
 
             const int8_t* K_row_base = K_values + i_KQ * K_row_stride;
 
-            #pragma unroll 2
+            // Hoist K_scales outside block_id loop - reduces LDS accesses
+            half k_scales_hoisted[blocks_per_K_row];
+            #pragma unroll
+            for (int block_id = 0; block_id < blocks_per_K_row; block_id++) {
+                k_scales_hoisted[block_id] = K_scales[block_id * nbatch_fa + i_KQ];
+            }
+
+            // Increased unroll factor (2->4) reduces loop overhead for common head dims
+            #pragma unroll 4
             for (int block_id = 0; block_id < blocks_per_K_row; block_id++) {
                 const int4* K_ptr4 = (const int4*)(K_row_base + block_id * 32);
                 const int4* Q_ptr4 = (const int4*)&Q_values[jc * DKQ + k_KQ_0 + block_id * 32];
 
-                const int4 K_lo = K_ptr4[0];
-                const int4 K_hi = K_ptr4[1];
-                const int4 Q_lo = Q_ptr4[0];
-                const int4 Q_hi = Q_ptr4[1];
-
                 int acc_int = 0;
+                const int4 K_lo = K_ptr4[0];
+                const int4 Q_lo = Q_ptr4[0];
+
                 acc_int = ggml_cuda_dp4a(K_lo.x, Q_lo.x, acc_int);
+                const int4 K_hi = K_ptr4[1];
                 acc_int = ggml_cuda_dp4a(K_lo.y, Q_lo.y, acc_int);
+                const int4 Q_hi = Q_ptr4[1];
                 acc_int = ggml_cuda_dp4a(K_lo.z, Q_lo.z, acc_int);
+                // Use hoisted K scale instead of LDS access
+                const half combined_scale_h = __hmul(k_scales_hoisted[block_id], q_scales_hoisted[block_id]);
                 acc_int = ggml_cuda_dp4a(K_lo.w, Q_lo.w, acc_int);
+
                 acc_int = ggml_cuda_dp4a(K_hi.x, Q_hi.x, acc_int);
                 acc_int = ggml_cuda_dp4a(K_hi.y, Q_hi.y, acc_int);
                 acc_int = ggml_cuda_dp4a(K_hi.z, Q_hi.z, acc_int);
                 acc_int = ggml_cuda_dp4a(K_hi.w, Q_hi.w, acc_int);
-
-                const half k_scale_h = K_scales[block_id * nbatch_fa + i_KQ];
-                const half combined_scale_h = __hmul(k_scale_h, q_scales_hoisted[block_id]);
 
                 KQ_acc[idx] += __half2float(combined_scale_h) * (float)acc_int;
             }
@@ -345,7 +346,6 @@ template <int warp_size, int nwarps, int ncols1, int ncols2, int DKQ, int DV, in
 static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
         int8_t * const Q_values,
         half * const Q_scales,
-        half * const Q_sums,
         const block_q8_0 * const __restrict__ K_q8,
         const half2 * const __restrict__ V_h2,
         const half  * const __restrict__ mask,
@@ -363,8 +363,7 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
         T_acc * const VKQ,
         const int k_VKQ_0,
         const int k_VKQ_max) {
-    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
-    constexpr int cpy_ne = cpy_nb / 4;
+    constexpr int cpy_ne = ggml_cuda_get_max_cpy_bytes() / 4;
 
     constexpr int ncols = ncols1*ncols2;
     constexpr int cpw   = ncols > nwarps ? ncols/nwarps : 1;
@@ -391,14 +390,14 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
     #pragma unroll
     for (int tile = 0; tile < num_K_tiles; tile++) {
         const int k_KQ_0 = tile * nbatch_K;
-        flash_attn_tile_q8_q8_iter_KQ<warp_size, nwarps, ncols1, ncols2, DKQ, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>(
-            Q_values, Q_scales, Q_sums, K_q8, K_values, K_scales, stride_K_q8, k_VKQ_0, k_VKQ_sup, k_KQ_0, KQ_acc);
+        flash_attn_tile_q8_q8_iter_KQ<warp_size, nwarps, ncols1, ncols2, DKQ, nbatch_fa, nbatch_K, oob_check>(
+            Q_values, Q_scales, K_q8, K_values, K_scales, stride_K_q8, k_VKQ_0, k_VKQ_sup, k_KQ_0, KQ_acc);
     }
 
     if constexpr (nbatch_K_last > 0) {
         constexpr int k_KQ_0 = DKQ - nbatch_K_last;
-        flash_attn_tile_q8_q8_iter_KQ<warp_size, nwarps, ncols1, ncols2, DKQ, nbatch_fa, nbatch_K_last, use_logit_softcap, oob_check>(
-            Q_values, Q_scales, Q_sums, K_q8, K_values, K_scales, stride_K_q8, k_VKQ_0, k_VKQ_sup, k_KQ_0, KQ_acc);
+        flash_attn_tile_q8_q8_iter_KQ<warp_size, nwarps, ncols1, ncols2, DKQ, nbatch_fa, nbatch_K_last, oob_check>(
+            Q_values, Q_scales, K_q8, K_values, K_scales, stride_K_q8, k_VKQ_0, k_VKQ_sup, k_KQ_0, KQ_acc);
     }
 
     if constexpr (num_i_KQ_iters == 1) {
@@ -409,7 +408,7 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
             const int j = (jc0 + (threadIdx.y / np)*cpw)/ncols2;
 
             if (use_logit_softcap) {
-                KQ_acc[jc0] = logit_softcap * tanhf(KQ_acc[jc0]);
+                KQ_acc[jc0] = logit_softcap * fast_tanh_f32(KQ_acc[jc0]);
             }
 
             if (!oob_check || i_KQ < k_VKQ_sup) {
@@ -431,7 +430,7 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
                 const int i_KQ = i_KQ_0 + (threadIdx.y % np)*warp_size + threadIdx.x;
 
                 if (use_logit_softcap) {
-                    KQ_acc[(i_KQ_0/(np*warp_size))*cpw + jc0] = logit_softcap * tanhf(KQ_acc[(i_KQ_0/(np*warp_size))*cpw + jc0]);
+                    KQ_acc[(i_KQ_0/(np*warp_size))*cpw + jc0] = logit_softcap * fast_tanh_f32(KQ_acc[(i_KQ_0/(np*warp_size))*cpw + jc0]);
                 }
 
                 if (!oob_check || i_KQ < k_VKQ_sup) {
@@ -470,11 +469,11 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
             for (int jc1 = 0; jc1 < KQ_cs; ++jc1) {
                 const int jc = jc0 + jc1;
 
-                const float KQ_max_scale = expf(KQ_max[jc] - KQ_max_new[jc]);
+                const float KQ_max_scale = fast_exp_f32(KQ_max[jc] - KQ_max_new[jc]);
                 KQ_max[jc] = KQ_max_new[jc];
 
                 const float val = !oob_check || i_KQ < k_VKQ_sup ?
-                    expf(KQ_acc[jc] - KQ_max[jc]) : 0.0f;
+                    fast_exp_f32(KQ_acc[jc] - KQ_max[jc]) : 0.0f;
                 const float KQ_sum_add = val;
                 tmp[0][jc1] = val;
 
@@ -500,14 +499,14 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
             for (int jc1 = 0; jc1 < KQ_cs; ++jc1) {
                 const int jc = jc0 + jc1;
 
-                const float KQ_max_scale = expf(KQ_max[jc] - KQ_max_new[jc]);
+                const float KQ_max_scale = fast_exp_f32(KQ_max[jc] - KQ_max_new[jc]);
                 KQ_max[jc] = KQ_max_new[jc];
 
                 float KQ_sum_add = 0.0f;
 #pragma unroll
                 for (int i0 = 0; i0 < nbatch_fa; i0 += np*warp_size) {
                     const float val = !oob_check || i0 + (threadIdx.y % np)*warp_size + threadIdx.x < k_VKQ_sup ?
-                        expf(KQ_acc[(i0/(np*warp_size))*cpw + jc] - KQ_max[jc]) : 0.0f;
+                        fast_exp_f32(KQ_acc[(i0/(np*warp_size))*cpw + jc] - KQ_max[jc]) : 0.0f;
                     KQ_sum_add += val;
                     tmp[i0/(np*warp_size)][jc1] = val;
                 }
@@ -548,10 +547,12 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
             half2 KQ_k[cpw];
 
             constexpr int cpy_ne_D = cpy_ne/2 < (DVp/2)/warp_size ? cpy_ne/2 : (DVp/2)/warp_size;
+
 #pragma unroll
             for (int i0 = 0; i0 < DVp/2; i0 += warp_size*cpy_ne_D) {
                 ggml_cuda_memcpy_1<cpy_ne_D*4>(&V_k[i0/warp_size], &V_tmp[(k1 + threadIdx.y % np)*(DV/2) + i0 + threadIdx.x*cpy_ne_D]);
             }
+
 #pragma unroll
             for (int jc_VKQ_0 = 0; jc_VKQ_0 < cpw; jc_VKQ_0 += KQ_cs) {
                 const int jc_KQ = jc_VKQ_0/KQ_cs + (threadIdx.y / np)*(cpw/KQ_cs);
@@ -567,9 +568,10 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
 
 #pragma unroll
             for (int i0 = 0; i0 < DVp/2; i0 += warp_size) {
+                const half2 v_val = V_k[i0/warp_size];
 #pragma unroll
                 for (int jc_VKQ_0 = 0; jc_VKQ_0 < cpw; ++jc_VKQ_0) {
-                    VKQ[jc_VKQ_0*((DVp/2)/warp_size) + i0/warp_size] += V_k[i0/warp_size]*KQ_k[jc_VKQ_0];
+                    VKQ[jc_VKQ_0*((DVp/2)/warp_size) + i0/warp_size] += v_val * KQ_k[jc_VKQ_0];
                 }
             }
         }
@@ -642,24 +644,23 @@ static __global__ void flash_attn_tile_q8(
     const int stride_V2   = nb21 / sizeof(half2);
     const int stride_mask = nb31 / sizeof(half);
 
-    const float slope = ncols2 == 1 ? get_alibi_slope(max_bias, head0, n_head_log2, m0, m1) : 1.0f;
+    float slope_tmp = 0.0f;
+    if (threadIdx.x == 0) {
+        slope_tmp = ncols2 == 1 ? get_alibi_slope(max_bias, head0, n_head_log2, m0, m1) : 1.0f;
+    }
+    const float slope = sgpr_broadcast_f32(slope_tmp);
 
-    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
-    constexpr int cpy_ne = cpy_nb / 4;
+    constexpr int cpy_ne = ggml_cuda_get_max_cpy_bytes() / 4;
 
     constexpr int cpw = ncols > nwarps ? ncols/nwarps : 1;
     constexpr int np  = nwarps > ncols ? nwarps/ncols : 1;
     static_assert(cpw == 1 || np == 1, "bad cpw / np");
     static_assert(nbatch_fa % (np*warp_size) == 0, "nbatch_fa % (np*warp_size) != 0");
 
-    constexpr int DKQp = (DKQ + 2*warp_size - 1) & ~(2*warp_size - 1);
     constexpr int DVp  = (DV  + 2*warp_size - 1) & ~(2*warp_size - 1);
 
     __shared__ int8_t Q_values[ncols * DKQ];
     __shared__ half   Q_scales[ncols * (DKQ/32)];
-
-    constexpr int blocks_per_Q_col = DKQ / QK8_0;
-    __shared__ half   Q_sums[ncols * blocks_per_Q_col];
 
     constexpr int K_row_padding = 16;
     __shared__ int8_t K_values[nbatch_fa * (nbatch_K + K_row_padding)];
@@ -677,8 +678,8 @@ static __global__ void flash_attn_tile_q8(
     }
     float KQ_sum[cpw] = {0.0f};
 
-    flash_attn_tile_q8_quantize_Q_to_shared<nwarps*warp_size, ncols, ncols2, DKQ, DKQp, cpw, np, cpy_ne>(
-        Q_f, Q_values, Q_scales, Q_sums, col_Q_0, int(ne01.z), nb01, nb02, scale);
+    flash_attn_tile_q8_quantize_Q_to_shared<nwarps*warp_size, ncols, ncols2, DKQ>(
+        Q_f, Q_values, Q_scales, col_Q_0, int(ne01.z), nb01, nb02, scale);
 
     const int k_VKQ_max = KV_max ? KV_max[sequence*gridDim.x + blockIdx.x] : ne11;
     if (ncols2 == 1) {
@@ -686,21 +687,21 @@ static __global__ void flash_attn_tile_q8(
         while (k_VKQ_0 < k_VKQ_max - nbatch_fa) {
             constexpr bool oob_check = false;
             flash_attn_tile_q8_q8_iter<warp_size, nwarps, ncols1, ncols2, DKQ, DV, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>
-                (Q_values, Q_scales, Q_sums, K_q8, V_h2, maskh, logit_softcap, slope, KQ, K_values, K_scales, KV_tmp,
+                (Q_values, Q_scales, K_q8, V_h2, maskh, logit_softcap, slope, KQ, K_values, K_scales, KV_tmp,
                 stride_K_q8, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max);
             k_VKQ_0 += gridDim.y*nbatch_fa;
         }
         if (k_VKQ_0 < k_VKQ_max) {
             constexpr bool oob_check = true;
             flash_attn_tile_q8_q8_iter<warp_size, nwarps, ncols1, ncols2, DKQ, DV, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>
-                (Q_values, Q_scales, Q_sums, K_q8, V_h2, maskh, logit_softcap, slope, KQ, K_values, K_scales, KV_tmp,
+                (Q_values, Q_scales, K_q8, V_h2, maskh, logit_softcap, slope, KQ, K_values, K_scales, KV_tmp,
                 stride_K_q8, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max);
         }
     } else {
         for (int k_VKQ_0 = blockIdx.y*nbatch_fa; k_VKQ_0 < k_VKQ_max; k_VKQ_0 += gridDim.y*nbatch_fa) {
             constexpr bool oob_check = false;
             flash_attn_tile_q8_q8_iter<warp_size, nwarps, ncols1, ncols2, DKQ, DV, nbatch_fa, nbatch_K, use_logit_softcap, oob_check>
-                (Q_values, Q_scales, Q_sums, K_q8, V_h2, maskh, logit_softcap, slope, KQ, K_values, K_scales, KV_tmp,
+                (Q_values, Q_scales, K_q8, V_h2, maskh, logit_softcap, slope, KQ, K_values, K_scales, KV_tmp,
                 stride_K_q8, stride_V2, stride_mask, KQ_max, KQ_sum, VKQ, k_VKQ_0, k_VKQ_max);
         }
     }
@@ -757,10 +758,10 @@ static __global__ void flash_attn_tile_q8(
             const float sink = ((const float *) sinks)[head0 + jc % ncols2];
 
             float KQ_max_new_j = fmaxf(KQ_max[jc0], sink);
-            const float KQ_max_scale = expf(KQ_max[jc0] - KQ_max_new_j);
+            const float KQ_max_scale = fast_exp_f32(KQ_max[jc0] - KQ_max_new_j);
             KQ_max[jc0] = KQ_max_new_j;
 
-            const float val = expf(sink - KQ_max[jc0]);
+            const float val = fast_exp_f32(sink - KQ_max[jc0]);
             KQ_sum[jc0] = KQ_sum[jc0]*KQ_max_scale + val;
 
             const half2 KQ_max_scale_h2 = make_half2(KQ_max_scale, KQ_max_scale);
