@@ -3,6 +3,67 @@
 
 #define CHUNK_SIZE 64
 
+// Causal Conv1d function for Q,K,V
+// When qkv is 0, it is Q, 1 is K, 2 is V
+static ggml_tensor * causal_conv1d(ggml_cgraph * gf, ggml_context * ctx0, ggml_tensor * conv_states_all, ggml_tensor * conv_state_all, int64_t qkv, ggml_tensor * x, ggml_tensor * proj_w, ggml_tensor * conv_w, ggml_tensor * conv_b, int64_t d_conv, int64_t head_dim, int64_t n_head, int64_t n_seq_tokens, int64_t n_seqs, int64_t n_tokens, int64_t kv_head) {
+    const int64_t d_inner = head_dim * n_head;
+    const int64_t conv_state_size = (d_conv - 1) * d_inner;
+    const int64_t n_embd_r_total = 3 * conv_state_size;  // Q + K + V
+
+    // conv_state_all is [n_embd_r_total, n_seqs], split into Q, K, V
+    // Each conv state is [(d_conv-1) * d_inner] per sequence, need to reshape to [d_conv-1, d_inner, n_seqs]
+    // Memory layout: for each seq, Q state is first conv_state_size elements, then K, then V
+    // conv_state_all has stride: nb[0] = element_size, nb[1] = n_embd_r_total * element_size
+    // View Q conv state: offset 0, size conv_state_size per seq
+    // conv_state_all is [n_embd_r_total, n_seqs] with memory layout:
+    //   state[i + seq * n_embd_r_total] where i = conv_step + channel * (d_conv-1) + {0, conv_state_size, 2*conv_state_size} for Q/K/V
+    // We want [d_conv-1, d_inner, n_seqs] view:
+    //   nb1 = (d_conv-1) * element_size (stride between channels)
+    //   nb2 = n_embd_r_total * element_size (stride between seqs)
+    ggml_tensor * conv_state_x = ggml_view_3d(ctx0, conv_state_all, d_conv - 1, d_inner, n_seqs,
+        (d_conv - 1) * ggml_element_size(conv_state_all),  // nb1: stride between channels
+        n_embd_r_total * ggml_element_size(conv_state_all),  // nb2: stride between seqs
+        qkv * conv_state_size * ggml_element_size(conv_state_all));
+
+// Causal Conv1d function for Q,K,V
+// When qkv is 0, it is Q, 1 is K, 2 is V
+    // Step 1: Q, K, V projections -> [d_inner, n_tokens]
+    ggml_tensor * x_proj = ggml_mul_mat(ctx0, proj_w, x);
+
+    // Reshape input: {d_inner, n_tokens} -> {d_inner, n_seq_tokens, n_seqs}
+    ggml_tensor * x_3d = ggml_reshape_3d(ctx0, x_proj, d_inner, n_seq_tokens, n_seqs);
+
+    // Concat Q conv state and current input: {d_conv-1 + n_seq_tokens, d_inner, n_seqs}
+    ggml_tensor * conv_x = ggml_cont(ctx0, ggml_concat(ctx0, conv_state_x, ggml_transpose(ctx0, x_3d), 0));
+
+    // Save last (d_conv-1) columns back to Q conv state
+    ggml_tensor * last_conv_x = ggml_view_3d(ctx0, conv_x, d_conv - 1, d_inner, n_seqs,
+        conv_x->nb[1], conv_x->nb[2], n_seq_tokens * conv_x->nb[0]);
+    ggml_build_forward_expand(gf,
+        ggml_cpy(ctx0, last_conv_x,
+            ggml_view_1d(ctx0, conv_states_all, conv_state_size * n_seqs,
+                (kv_head * n_embd_r_total + qkv * conv_state_size) * ggml_element_size(conv_states_all))));
+    // Reshape conv weight: GGUF [d_conv, 1, d_inner, 1] -> ggml_ssm_conv expects [d_conv, d_inner]
+    // GGUF stores as [d_conv, 1, d_inner, 1] with memory layout w[conv_step + channel * d_conv]
+    // vLLM stores as [d_inner, d_conv] with memory layout w[channel * d_conv + conv_step]
+    // ggml_ssm_conv computes: c[conv_step + channel * d_conv]
+    // GGUF layout: [d_conv, 1, d_inner] or [d_conv, 1, d_inner, 1] -> reshape to [d_conv, d_inner]
+    // Reshape conv weight from [d_conv, 1, d_inner, 1] to [d_conv, d_inner] for ggml_ssm_conv
+    ggml_tensor * conv_weight = ggml_reshape_2d(ctx0, conv_w, d_conv, d_inner);
+
+    // Apply conv1d
+    // ggml_ssm_conv output: {d_inner, n_seq_tokens, n_seqs}
+    ggml_tensor * Xcur = ggml_ssm_conv(ctx0, conv_x, conv_weight);
+    // Reshape to 2D for bias add: {d_inner, n_tokens}
+    Xcur = ggml_reshape_2d(ctx0, Xcur, d_inner, n_tokens);
+    if (conv_b) {
+        Xcur = ggml_add(ctx0, Xcur, conv_b);
+    }
+    Xcur = ggml_silu(ctx0, Xcur);
+
+    return ggml_reshape_4d(ctx0, Xcur, head_dim, n_head, n_seq_tokens, n_seqs);
+}
+
 llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const llm_graph_params & params) :
     llm_graph_context_mamba(params), model(model) {
     ggml_tensor * cur;
@@ -78,153 +139,11 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
             // Get conv states from r_l tensor (Q, K, V each have separate state)
             ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
             cb(conv_states_all, "conv_states_all", il);
-            const int64_t conv_state_size = (d_conv - 1) * d_inner;
-            const int64_t n_embd_r_total = 3 * conv_state_size;  // Q + K + V
             ggml_tensor * conv_state_all = build_rs(inp_rs, conv_states_all, hparams.n_embd_r(), n_seqs);
-            // conv_state_all is [n_embd_r_total, n_seqs], split into Q, K, V
-            // Each conv state is [(d_conv-1) * d_inner] per sequence, need to reshape to [d_conv-1, d_inner, n_seqs]
-            // Memory layout: for each seq, Q state is first conv_state_size elements, then K, then V
-            // conv_state_all has stride: nb[0] = element_size, nb[1] = n_embd_r_total * element_size
-            // View Q conv state: offset 0, size conv_state_size per seq
-            // conv_state_all is [n_embd_r_total, n_seqs] with memory layout:
-            //   state[i + seq * n_embd_r_total] where i = conv_step + channel * (d_conv-1) + {0, conv_state_size, 2*conv_state_size} for Q/K/V
-            // We want [d_conv-1, d_inner, n_seqs] view:
-            //   nb1 = (d_conv-1) * element_size (stride between channels)
-            //   nb2 = n_embd_r_total * element_size (stride between seqs)
-            ggml_tensor * conv_state_q = ggml_view_3d(ctx0, conv_state_all, d_conv - 1, d_inner, n_seqs,
-                (d_conv - 1) * ggml_element_size(conv_state_all),  // nb1: stride between channels
-                n_embd_r_total * ggml_element_size(conv_state_all),  // nb2: stride between seqs
-                0);  // offset for Q
-            ggml_tensor * conv_state_k = ggml_view_3d(ctx0, conv_state_all, d_conv - 1, d_inner, n_seqs,
-                (d_conv - 1) * ggml_element_size(conv_state_all),
-                n_embd_r_total * ggml_element_size(conv_state_all),
-                conv_state_size * ggml_element_size(conv_state_all));  // offset for K
-            ggml_tensor * conv_state_v = ggml_view_3d(ctx0, conv_state_all, d_conv - 1, d_inner, n_seqs,
-                (d_conv - 1) * ggml_element_size(conv_state_all),
-                n_embd_r_total * ggml_element_size(conv_state_all),
-                2 * conv_state_size * ggml_element_size(conv_state_all));  // offset for V
+            ggml_tensor * Qcur = causal_conv1d(gf, ctx0, conv_states_all, conv_state_all, 0, cur, layer.wq, layer.ssm_q_conv, layer.ssm_q_conv_b, d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, kv_head);
+            ggml_tensor * Kcur = causal_conv1d(gf, ctx0, conv_states_all, conv_state_all, 1, cur, layer.wk, layer.ssm_k_conv, layer.ssm_k_conv_b, d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, kv_head);
+            ggml_tensor * Vcur = causal_conv1d(gf, ctx0, conv_states_all, conv_state_all, 2, cur, layer.wv, layer.ssm_v_conv, layer.ssm_v_conv_b, d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, kv_head);
 
-            // Step 1: Q, K, V projections -> [d_inner, n_tokens]
-            ggml_tensor * q_proj = ggml_mul_mat(ctx0, layer.wq, cur);
-            ggml_tensor * k_proj = ggml_mul_mat(ctx0, layer.wk, cur);
-            ggml_tensor * v_proj = ggml_mul_mat(ctx0, layer.wv, cur);
-            cb(q_proj, "kda_q_proj", il);
-            cb(k_proj, "kda_k_proj", il);
-            cb(v_proj, "kda_v_proj", il);
-
-            // Step 2: Causal Conv1d for Q
-            // Reshape input: {d_inner, n_tokens} -> {d_inner, n_seq_tokens, n_seqs}
-            ggml_tensor * q_3d = ggml_reshape_3d(ctx0, q_proj, d_inner, n_seq_tokens, n_seqs);
-
-            // Concat Q conv state and current input: {d_conv-1 + n_seq_tokens, d_inner, n_seqs}
-            ggml_tensor * conv_q = ggml_concat(ctx0, conv_state_q, ggml_transpose(ctx0, q_3d), 0);
-
-            // Save last (d_conv-1) columns back to Q conv state
-            ggml_tensor * last_conv_q = ggml_view_3d(ctx0, conv_q, d_conv - 1, d_inner, n_seqs,
-                conv_q->nb[1], conv_q->nb[2], n_seq_tokens * conv_q->nb[0]);
-            ggml_build_forward_expand(gf,
-                ggml_cpy(ctx0, last_conv_q,
-                    ggml_view_1d(ctx0, conv_states_all, conv_state_size * n_seqs,
-                        kv_head * n_embd_r_total * ggml_element_size(conv_states_all))));
-            // Reshape conv weight: GGUF [d_conv, 1, d_inner, 1] -> ggml_ssm_conv expects [d_conv, d_inner]
-            // GGUF stores as [d_conv, 1, d_inner, 1] with memory layout w[conv_step + channel * d_conv]
-            // vLLM stores as [d_inner, d_conv] with memory layout w[channel * d_conv + conv_step]
-            // ggml_ssm_conv computes: c[conv_step + channel * d_conv]
-            // GGUF layout: [d_conv, 1, d_inner] or [d_conv, 1, d_inner, 1] -> reshape to [d_conv, d_inner]
-            ggml_tensor * conv_weight = nullptr;
-            if (layer.ssm_q_conv) {
-                // Reshape conv weight from [d_conv, 1, d_inner, 1] to [d_conv, d_inner] for ggml_ssm_conv
-                // Cast to F32 if quantized (ggml_ssm_conv requires float weights)
-                ggml_tensor * q_conv_f32 = layer.ssm_q_conv;
-                if (q_conv_f32->type != GGML_TYPE_F32) {
-                    q_conv_f32 = ggml_cast(ctx0, q_conv_f32, GGML_TYPE_F32);
-                }
-                conv_weight = ggml_reshape_2d(ctx0, q_conv_f32, d_conv, d_inner);
-            }
-
-            // Apply conv1d
-            ggml_tensor * Qcur;
-            if (conv_weight) {
-                // Make conv_q contiguous for ggml_ssm_conv
-                conv_q = ggml_cont(ctx0, conv_q);
-
-                // ggml_ssm_conv output: {d_inner, n_seq_tokens, n_seqs}
-                Qcur = ggml_ssm_conv(ctx0, conv_q, conv_weight);
-                cb(Qcur, "Q conv1d", il);
-                // Reshape to 2D for bias add: {d_inner, n_tokens}
-                Qcur = ggml_reshape_2d(ctx0, Qcur, d_inner, n_tokens);
-                if (layer.ssm_q_conv_b) {
-                    Qcur = ggml_add(ctx0, Qcur, layer.ssm_q_conv_b);
-                }
-                Qcur = ggml_silu(ctx0, Qcur);
-                cb(Qcur, "Q conv1d b", il);
-            } else {
-                GGML_ABORT("KDA layer missing Q conv weight");
-            }
-
-            // K conv1d (with separate K conv state)
-            ggml_tensor * Kcur;
-            if (layer.ssm_k_conv) {
-                ggml_tensor * k_3d = ggml_reshape_3d(ctx0, k_proj, d_inner, n_seq_tokens, n_seqs);
-                ggml_tensor * conv_k = ggml_cont(ctx0, ggml_concat(ctx0, conv_state_k, ggml_transpose(ctx0, k_3d), 0));
-
-                // Save K conv state
-                ggml_tensor * last_conv_k = ggml_view_3d(ctx0, conv_k, d_conv - 1, d_inner, n_seqs,
-                    conv_k->nb[1], conv_k->nb[2], n_seq_tokens * conv_k->nb[0]);
-                ggml_build_forward_expand(gf,
-                    ggml_cpy(ctx0, last_conv_k,
-                        ggml_view_1d(ctx0, conv_states_all, conv_state_size * n_seqs,
-                            (kv_head * n_embd_r_total + conv_state_size) * ggml_element_size(conv_states_all))));
-
-                ggml_tensor * k_conv_f32 = layer.ssm_k_conv;
-                if (k_conv_f32->type != GGML_TYPE_F32) {
-                    k_conv_f32 = ggml_cast(ctx0, k_conv_f32, GGML_TYPE_F32);
-                }
-                ggml_tensor * k_conv_weight = ggml_reshape_2d(ctx0, k_conv_f32, d_conv, d_inner);
-                Kcur = ggml_ssm_conv(ctx0, conv_k, k_conv_weight);
-                cb(Kcur, "K conv1d", il);
-                Kcur = ggml_reshape_2d(ctx0, Kcur, d_inner, n_tokens);
-                if (layer.ssm_k_conv_b) {
-                    Kcur = ggml_add(ctx0, Kcur, layer.ssm_k_conv_b);
-                }
-                Kcur = ggml_silu(ctx0, Kcur);
-                cb(Kcur, "K conv1d b", il);
-            } else {
-                GGML_ABORT("KDA layer missing K conv weight");
-            }
-
-            // V conv1d (with separate V conv state)
-            ggml_tensor * Vcur;
-            if (layer.ssm_v_conv) {
-                ggml_tensor * v_3d = ggml_reshape_3d(ctx0, v_proj, d_inner, n_seq_tokens, n_seqs);
-                ggml_tensor * conv_v = ggml_cont(ctx0, ggml_concat(ctx0, conv_state_v, ggml_transpose(ctx0, v_3d), 0));
-
-                // Save V conv state
-                ggml_tensor * last_conv_v = ggml_view_3d(ctx0, conv_v, d_conv - 1, d_inner, n_seqs,
-                    conv_v->nb[1], conv_v->nb[2], n_seq_tokens * conv_v->nb[0]);
-                ggml_build_forward_expand(gf,
-                    ggml_cpy(ctx0, last_conv_v,
-                        ggml_view_1d(ctx0, conv_states_all, conv_state_size * n_seqs,
-                            (kv_head * n_embd_r_total + 2 * conv_state_size) * ggml_element_size(conv_states_all))));
-
-                ggml_tensor * v_conv_f32 = layer.ssm_v_conv;
-                if (v_conv_f32->type != GGML_TYPE_F32) {
-                    v_conv_f32 = ggml_cast(ctx0, v_conv_f32, GGML_TYPE_F32);
-                }
-                ggml_tensor * v_conv_weight = ggml_reshape_2d(ctx0, v_conv_f32, d_conv, d_inner);
-                Vcur = ggml_ssm_conv(ctx0, conv_v, v_conv_weight);
-                cb(Vcur, "V conv1d", il);
-                Vcur = ggml_reshape_2d(ctx0, Vcur, d_inner, n_tokens);
-                if (layer.ssm_v_conv_b) {
-                    Vcur = ggml_add(ctx0, Vcur, layer.ssm_v_conv_b);
-                }
-                Vcur = ggml_silu(ctx0, Vcur);
-                cb(Vcur, "V conv1d b", il);
-            } else {
-                GGML_ABORT("KDA layer missing V conv weight");
-            }
-
-            // Step 3: Compute g1 (forget gate)
             // g1 = -exp(A_log) * softplus(f_b(f_a(x)) + dt_bias)
             ggml_tensor * f_a = ggml_mul_mat(ctx0, layer.ssm_f_a, cur);
             ggml_tensor * g1 = ggml_mul_mat(ctx0, layer.ssm_f_b, f_a);
@@ -241,24 +160,18 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
             g1 = ggml_mul(ctx0, g1, A_neg_exp);
             cb(g1, "kda_g1", il);
 
-            // Step 4: Compute beta (mixing coefficient)
+            // Compute beta (mixing coefficient)
             ggml_tensor * beta = ggml_mul_mat(ctx0, layer.ssm_beta, cur);
-            beta = ggml_cont_4d(ctx0, beta, n_head, 1, n_seq_tokens, n_seqs);
+            beta = ggml_reshape_4d(ctx0, beta, n_head, 1, n_seq_tokens, n_seqs);
             cb(beta, "kda_beta", il);
 
-            // Step 5: Reshape for KDA recurrence
+            // Reshape for KDA recurrence
             // {n_embd, n_tokens} -> {n_embd, n_seq_tokens, n_seqs}
             cur = ggml_reshape_3d(ctx0, cur, cur->ne[0], n_seq_tokens, n_seqs);
 
-            Qcur = ggml_cont(ctx0, ggml_reshape_4d(ctx0, Qcur, head_dim, n_head, n_seq_tokens, n_seqs));
-            Kcur = ggml_cont(ctx0, ggml_reshape_4d(ctx0, Kcur, head_dim, n_head, n_seq_tokens, n_seqs));
-            Vcur = ggml_cont(ctx0, ggml_reshape_4d(ctx0, Vcur, head_dim, n_head, n_seq_tokens, n_seqs));
-            g1 = ggml_cont(ctx0, ggml_reshape_4d(ctx0, g1, head_dim, n_head, n_seq_tokens, n_seqs));
-            cb(Qcur, "kda_Q", il);
-            cb(Kcur, "kda_K", il);
-            cb(Vcur, "kda_V", il);
+            g1 = ggml_reshape_4d(ctx0, g1, head_dim, n_head, n_seq_tokens, n_seqs);
 
-            // Step 6: Get SSM state and compute KDA recurrence using ggml_kda_scan
+            // Get SSM state and compute KDA recurrence using ggml_kda_scan
             ggml_tensor * ssm_states_all = mctx_cur->get_s_l(il);
             ggml_tensor * state = build_rs(inp_rs, ssm_states_all, hparams.n_embd_s(), n_seqs);
             state = ggml_reshape_4d(ctx0, state, head_dim, head_dim, n_head, n_seqs);
@@ -278,14 +191,14 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
                                               ggml_view_1d(ctx0, ssm_states_all, hparams.n_embd_s() * n_seqs,
                                                            kv_head * hparams.n_embd_s() * ggml_element_size(ssm_states_all))));
 
-            // Step 7: Output gating g2 = g_b(g_a(x))
+            // Output gating g2 = g_b(g_a(x))
             ggml_tensor * cur_2d = ggml_reshape_2d(ctx0, cur, cur->ne[0], n_seq_tokens * n_seqs);
             ggml_tensor * g_a = ggml_mul_mat(ctx0, layer.ssm_g_a, cur_2d);
             ggml_tensor * g2 = ggml_mul_mat(ctx0, layer.ssm_g_b, g_a);
             cb(g2, "g2 g_b(g_a(cur_2d))", il);
             g2 = ggml_reshape_3d(ctx0, g2, head_dim, n_head, n_seq_tokens * n_seqs);
 
-            // Step 8: Apply o_norm with sigmoid gating
+            // Apply o_norm with sigmoid gating
             // Note: Kimi model uses sigmoid gating, not SiLU (despite FusedRMSNormGated default being swish)
             // Formula: output = RMSNorm(x) * sigmoid(g)
             ggml_tensor * attn_out_final = ggml_reshape_3d(ctx0, output, head_dim, n_head,  n_seq_tokens * n_seqs);
@@ -294,7 +207,7 @@ llm_build_kimi_linear::llm_build_kimi_linear(const llama_model & model, const ll
             ggml_tensor * gate = ggml_sigmoid(ctx0, g2);
             ggml_tensor * gated = ggml_mul(ctx0, normed, gate);
 
-            // Step 9: Output projection
+            // Output projection
             gated = ggml_cont_2d(ctx0, gated, d_inner, n_tokens);
             cur = ggml_mul_mat(ctx0, layer.wo, gated);
             cb(cur, "kda_out", il);
