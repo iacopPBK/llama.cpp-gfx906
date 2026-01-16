@@ -3751,7 +3751,9 @@ static bool ggml_cuda_set_cuda_graph_enabled(ggml_backend_cuda_context * cuda_ct
 
     cuda_ctx->cuda_graph->cuda_graphs_enabled = use_cuda_graph;
 #else
+
     bool use_cuda_graph = false;
+
 #endif // USE_CUDA_GRAPH
 
     return use_cuda_graph;
