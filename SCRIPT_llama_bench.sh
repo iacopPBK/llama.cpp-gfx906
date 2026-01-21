@@ -12,7 +12,7 @@ cat << 'EOF'
            ██║  ███╗█████╗   ╚███╔╝ ╚██████║██║██╔██║███████╗
            ██║   ██║██╔══╝   ██╔██╗  ╚═══██║████╔╝██║██╔═══██╗
            ╚██████╔╝██║     ██╔╝ ██╗ █████╔╝╚██████╔╝╚██████╔╝
-            ╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚════╝  ╚═════╝  ╚═════╝                    
+            ╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚════╝  ╚═════╝  ╚═════╝
 
 
 EOF
@@ -23,15 +23,24 @@ export CUDA_VISIBLE_DEVICES=0
 export ROCR_VISIBLE_DEVICES=0
 export GGML_BACKEND_HIP=1
 export HCC_AMDGPU_TARGET=gfx906
-# export AMD_LOG_LEVEL=3  # Disabled - too verbose
+export GGML_CUDA_Q8_CACHE=1
+export GGML_CUDA_RMS_MUL_MMQ_FUSION=1
+export GGML_GFX906_CUBLAS_DEBUG=1                                                                              
+export GGML_GFX906_MMF_DEBUG=1    
+#unset GGML_CUDA_DISABLE_GRAPHS                                                                             
 
-MODEL_PATH="/path/..."
+# Disable debug output for cleaner benchmark results
+unset GGML_CUDA_Q8_CACHE_DEBUG
 
+MODEL_PATH="/media/iacoppbk/80F42C9BF42C96061/llms/Qwen3-VL-30B-A3B-Thinking-Q4_1.gguf"
+#MODEL_PATH="/media/iacoppbk/80F42C9BF42C96061/llms/openai_gpt-oss-20b-MXFP4.gguf"
+MODEL_PATH="/home/iacoppbk/Downloads/GLM-4.7-Flash-Q4_1.gguf"
+#MODEL_PATH="/media/iacoppbk/80F42C9BF42C96061/llms/Qwen3-4B-Instruct-2507-Q4_0.gguf"
 LOG_FILE="bench_results.md"
 
 BENCH_PARAMS=(
     -m "$MODEL_PATH"       # Model path
-    -ngl 99                # Number of GPU layers (32 optimal for 80B on MI50 16GB)
+    -ngl 99                # Number of GPU layers (all on GPU)
     -t $(nproc)            # Number of CPU threads
     -fa 1                  # Flash attention (1=on, 0=off)
     -ctk q8_0              # KV cache key type (q8_0 quantization)
@@ -39,40 +48,26 @@ BENCH_PARAMS=(
     --main-gpu 0           # Main GPU device ID
     --progress             # Show progress during benchmark
     -r 1                   # Number of repetitions
-    #-b 2048
-    #-ub 1800
-    -d 8192               # Context size 
+    -b 2048                # Batch size
+    -ub 1536                # Micro-batch size
+    #-d 8192               # Context size 
 )
 
-STANDARD_TEST="-n 128"  # -p: prompt tokens, -n: generation tokens
+# Benchmark tests:
+# - Prompt processing (pp): 512, 2048, 8192 tokens
+# - Token generation (tg): 128, 512 tokens
+# - Depth: 0 (default context)
+BENCH_TESTS="-p 512 -n 128"
 
-# ============================================================================
-# DUAL MI50 CONFIG (@fuutott)
-# ============================================================================
-# HIP_VISIBLE_DEVICES=0,1 llama-bench \
-#   -m ~/.cache/llama.cpp/gpt-oss-120b-MXFP4.gguf \  # Model path
-#   -p 512 \              # Prompt tokens to process
-#   -n 128 \              # Number of tokens to generate
-#   -ngl 99 \             # GPU layers (99 = all on GPU)
-#   -mmp 0 \              # Memory map (0=disabled for multi-GPU)
-#   -fa 1 \               # Flash attention enabled
-#   -o md \               # Output format (markdown)
-#   -r 3 \                # Number of repetitions
-#   -d 0,8192 \           # Context sizes to test (0=default, 8192)
-#   --main-gpu 0          # Primary GPU device ID
-# ============================================================================
-
-usage() {
-    echo "Model: $MODEL_PATH"
-}
-
-
-echo "=== benchmark ==="
+echo "=== Benchmark ==="
 echo "Model: $(basename "$MODEL_PATH")"
+echo "Tests: pp512, pp2048, pp8192, tg128, tg512"
+echo ""
 
 cd "$(dirname "$0")"
 [ ! -f "./build/bin/llama-bench" ] && echo "Error: llama-bench not found" && exit 1
 
-./build/bin/llama-bench "${BENCH_PARAMS[@]}" $STANDARD_TEST "$@" 2>&1 | tee -a "$LOG_FILE"
+./build/bin/llama-bench "${BENCH_PARAMS[@]}" $BENCH_TESTS "$@" 2>&1 | tee -a "$LOG_FILE"
 
+echo ""
 echo "Output saved to: $LOG_FILE"
