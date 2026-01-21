@@ -78,7 +78,9 @@ struct task_params {
     task_response_type res_type = TASK_RESPONSE_TYPE_NONE;
     std::string        oaicompat_model;
     std::string        oaicompat_cmpl_id;
-    common_chat_syntax oaicompat_chat_syntax;
+
+    // per-request parameters for chat parsing
+    common_chat_parser_params chat_parser_params;
 
     // Embeddings
     int32_t embd_normalize = 2; // (-1=none, 0=max absolute int16, 1=taxicab, 2=Euclidean/L2, >2=p-norm)
@@ -91,13 +93,17 @@ struct task_params {
 struct task_result_state {
     // tracking diffs for partial tool calls
     std::vector<common_chat_msg_diff> diffs;
-    common_chat_syntax oaicompat_chat_syntax;
+    common_chat_parser_params chat_parser_params;
     common_chat_msg chat_msg;
     std::string generated_text; // append new chunks of generated text here
     std::vector<std::string> generated_tool_call_ids;
 
-    task_result_state(const common_chat_syntax & oaicompat_chat_syntax)
-        : oaicompat_chat_syntax(oaicompat_chat_syntax) {}
+    // for Anthropic API streaming: track content block state across chunks
+    bool anthropic_thinking_block_started = false;
+    bool anthropic_text_block_started = false;
+
+    task_result_state(const common_chat_parser_params & chat_parser_params)
+        : chat_parser_params(chat_parser_params) {}
 
     // parse partial tool calls and update the internal state
     common_chat_msg update_chat_msg(
@@ -117,15 +123,19 @@ struct server_task {
     int id_slot   = -1;
 
     // used by parallel sampling (multiple completions from same prompt)
-    int n_children =  0; // number of tasks reusing this prompt
     int id_parent  = -1;
+    // temporary store of child tasks for scheduling
+    // note: accessing to elements is invalid after the task is moved to server_slot
+    std::vector<server_task> child_tasks;
 
     // used by SERVER_TASK_TYPE_INFERENCE
     task_params   params;
     server_tokens tokens;
 
-    // only used by CLI, this delegates the tokenization to the server
-    json                    cli_input = nullptr;
+    // only used by CLI, this allow tokenizing CLI inputs on server side
+    // we need this because mtmd_context and vocab are not accessible outside of server_context
+    bool                    cli = false;
+    std::string             cli_prompt;
     std::vector<raw_buffer> cli_files;
 
     server_task_type type;
@@ -152,6 +162,36 @@ struct server_task {
         return tokens.size();
     }
 
+    bool need_embd() const {
+        switch (type) {
+            case SERVER_TASK_TYPE_EMBEDDING:
+            case SERVER_TASK_TYPE_RERANK:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    bool need_logits() const {
+        switch (type) {
+            case SERVER_TASK_TYPE_COMPLETION:
+            case SERVER_TASK_TYPE_INFILL:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    bool need_sampling() const {
+        switch (type) {
+            case SERVER_TASK_TYPE_COMPLETION:
+            case SERVER_TASK_TYPE_INFILL:
+                return true;
+            default:
+                return false;
+        }
+    }
+
     static task_params params_from_json_cmpl(
         const llama_vocab * vocab,
         const common_params & params_base,
@@ -163,11 +203,14 @@ struct server_task {
         std::unordered_set<int> ids(tasks.size());
         for (size_t i = 0; i < tasks.size(); i++) {
             ids.insert(tasks[i].id);
+            for (auto & child : tasks[i].child_tasks) {
+                ids.insert(child.id);
+            }
         }
         return ids;
     }
 
-    server_task create_child(int id_parent, int id_child) const {
+    void add_child(int id_parent, int id_child) {
         server_task copy;
 
         copy.id        = id_child;
@@ -175,14 +218,29 @@ struct server_task {
         copy.params    = params;
         copy.type      = type;
         copy.tokens    = tokens.clone();
+        copy.id_slot   = -1; // child tasks cannot specify slot
 
-        return copy;
+        // use different sampling seed for each child
+        // note: https://github.com/ggml-org/llama.cpp/pull/18700#discussion_r2675115723
+        if (copy.params.sampling.seed != LLAMA_DEFAULT_SEED) {
+            copy.params.sampling.seed += (uint32_t)child_tasks.size() + 1;
+        }
+
+        child_tasks.push_back(std::move(copy));
     }
 
     // the task will be moved into queue, then onto slots
     // however, the state must be kept by caller (e.g., HTTP thread)
     task_result_state create_state() const {
-        return task_result_state(params.oaicompat_chat_syntax);
+        return task_result_state(params.chat_parser_params);
+    }
+
+    bool is_parent() const {
+        return child_tasks.size() > 0;
+    }
+
+    bool is_child() const {
+        return id_parent != -1;
     }
 };
 
@@ -339,6 +397,12 @@ struct server_task_result_cmpl_partial : server_task_result {
     std::vector<common_chat_msg_diff> oaicompat_msg_diffs; // to be populated by update()
     bool is_updated = false;
 
+    // for Anthropic API: track if any reasoning content has been generated
+    bool anthropic_has_reasoning = false;
+    // Streaming state copied from task_result_state for this chunk
+    bool anthropic_thinking_block_started = false;
+    bool anthropic_text_block_started = false;
+
     virtual bool is_stop() override {
         return false; // in stream mode, partial responses are not considered stop
     }
@@ -348,6 +412,22 @@ struct server_task_result_cmpl_partial : server_task_result {
     virtual void update(task_result_state & state) override {
         is_updated = true;
         state.update_chat_msg(content, true, oaicompat_msg_diffs);
+        // track if the accumulated message has any reasoning content
+        anthropic_has_reasoning = !state.chat_msg.reasoning_content.empty();
+
+        // Copy current state for use in to_json_anthropic() (reflects state BEFORE this chunk)
+        anthropic_thinking_block_started = state.anthropic_thinking_block_started;
+        anthropic_text_block_started = state.anthropic_text_block_started;
+
+        // Pre-compute state updates based on diffs (for next chunk)
+        for (const auto & diff : oaicompat_msg_diffs) {
+            if (!diff.reasoning_content_delta.empty() && !state.anthropic_thinking_block_started) {
+                state.anthropic_thinking_block_started = true;
+            }
+            if (!diff.content_delta.empty() && !state.anthropic_text_block_started) {
+                state.anthropic_text_block_started = true;
+            }
+        }
     }
 
     json to_json_non_oaicompat();

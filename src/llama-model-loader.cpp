@@ -2,6 +2,7 @@
 
 #include "ggml.h"
 
+#include <algorithm>
 #include <array>
 #include <cinttypes>
 #include <cstring>
@@ -344,6 +345,7 @@ namespace GGUFMeta {
             GGUFMeta::GKV<GGUFMeta::ArrayInfo>::get_kv(ctx, kid);
 
         switch (arr_info.gt) {
+            case GGUF_TYPE_BOOL:
             case GGUF_TYPE_UINT32:
             case GGUF_TYPE_INT32:   GGML_ASSERT((std::is_same<T,     int32_t>::value) ||
                                                 (std::is_same<T,    uint32_t>::value)); break;
@@ -365,7 +367,13 @@ namespace GGUFMeta {
                 result[i] = value;
             }
         } else {
-            std::copy((const T*)arr_info.data, (const T *)arr_info.data + arr_info.length, result.begin());
+            if (arr_info.gt == GGUF_TYPE_BOOL) {
+                std::transform((const bool *)arr_info.data, (const bool *)arr_info.data + arr_info.length, result.begin(), [](bool x) {
+                    return static_cast<T>(x);
+                });
+            } else {
+                std::copy((const T*)arr_info.data, (const T *)arr_info.data + arr_info.length, result.begin());
+            }
         }
 
         return true;
@@ -531,12 +539,18 @@ llama_model_loader::llama_model_loader(
     files.emplace_back(new llama_file(fname.c_str(), "rb", use_direct_io));
     contexts.emplace_back(ctx);
 
-    // check if direct I/O is actually available
-    use_direct_io = use_direct_io && files.back()->has_direct_io();
-
-    if (use_direct_io && use_mmap) {
-        use_mmap = false;
-        LLAMA_LOG_WARN("%s: direct I/O is enabled, disabling mmap\n", __func__);
+    if (use_mmap && use_direct_io) {
+        if (files.back()->has_direct_io()) {
+            // Disable mmap, as DirectIO is available
+            use_mmap = false;
+            LLAMA_LOG_WARN("%s: direct I/O is enabled, disabling mmap\n", __func__);
+        } else {
+            // Disable DirectIO and reopen file using std::fopen for mmap
+            use_direct_io = false;
+            files.pop_back();
+            files.emplace_back(new llama_file(fname.c_str(), "rb", false));
+            LLAMA_LOG_WARN("%s: direct I/O is not available, using mmap\n", __func__);
+        }
     }
 
     // Save tensors data offset of the main file.
@@ -1110,7 +1124,8 @@ bool llama_model_loader::load_all_data(
             const auto & file = files.at(weight->idx);
 
             if (ggml_backend_buffer_is_host(cur->buffer)) {
-                file->read_raw_at(cur->data, n_size, weight->offs);
+                file->seek(weight->offs, SEEK_SET);
+                file->read_raw(cur->data, n_size);
                 if (check_tensors) {
                     validation_result.emplace_back(std::async(std::launch::async, [cur, n_size] {
                         return std::make_pair(cur, ggml_validate_row_data(cur->type, cur->data, n_size));
@@ -1142,7 +1157,7 @@ bool llama_model_loader::load_all_data(
                         ggml_backend_event_synchronize(events[buffer_idx]);
 
                         // Read aligned chunk from file
-                        file->read_raw(reinterpret_cast<void *>(ptr_dest_aligned), read_size);
+                        file->read_raw_unsafe(reinterpret_cast<void *>(ptr_dest_aligned), read_size);
 
                         // Calculate actual data portion (excluding alignment padding)
                         uintptr_t ptr_data = ptr_dest_aligned;
@@ -1172,7 +1187,8 @@ bool llama_model_loader::load_all_data(
                     }
                 } else {
                     read_buf.resize(n_size);
-                    file->read_raw_at(read_buf.data(), n_size, weight->offs);
+                    file->seek(weight->offs, SEEK_SET);
+                    file->read_raw(read_buf.data(), n_size);
                     ggml_backend_tensor_set(cur, read_buf.data(), 0, n_size);
                     if (check_tensors && !ggml_validate_row_data(cur->type, read_buf.data(), n_size)) {
                         throw std::runtime_error(format("tensor '%s' has invalid data", ggml_get_name(cur)));

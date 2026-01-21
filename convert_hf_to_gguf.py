@@ -587,10 +587,6 @@ class ModelBase:
                             gguf.MODEL_TENSOR.A_ENC_EMBD_POS,
                             gguf.MODEL_TENSOR.ALTUP_CORRECT_COEF,
                             gguf.MODEL_TENSOR.ALTUP_PREDICT_COEF,
-                            # Kimi KDA conv weights should be F32
-                            gguf.MODEL_TENSOR.SSM_CONV1D_Q,
-                            gguf.MODEL_TENSOR.SSM_CONV1D_K,
-                            gguf.MODEL_TENSOR.SSM_CONV1D_V,
                         )
                     )
                     or new_name[-7:] not in (".weight", ".lora_a", ".lora_b")
@@ -779,8 +775,8 @@ class TextModel(ModelBase):
 
         self.rope_parameters = self.hparams.get("rope_parameters", self.hparams.get("rope_scaling")) or {}
 
-        rope_theta = self.find_hparam(["rope_theta", "global_rope_theta", "rotary_emb_base"], optional=True)
-        local_rope_theta = self.find_hparam(["local_rope_theta", "rope_local_theta", "swa_rope_theta", "rope_local_base_freq"], optional=True)
+        rope_theta = self.find_hparam(["global_rope_theta", "rope_global_theta", "rope_theta_global", "rope_theta", "rotary_emb_base"], optional=True)
+        local_rope_theta = self.find_hparam(["local_rope_theta", "rope_local_theta", "rope_theta_local", "swa_rope_theta", "rope_local_base_freq"], optional=True)
 
         # Ensure "rope_theta" and "rope_type" is mirrored in rope_parameters
         if "full_attention" not in self.rope_parameters and "sliding_attention" not in self.rope_parameters:
@@ -1082,6 +1078,9 @@ class TextModel(ModelBase):
         if chkhsh == "b3d1dd861f1d4c5c0d2569ce36baf3f90fe8a102db3de50dd71ff860d91be3df":
             # ref: https://huggingface.co/aari1995/German_Semantic_V3
             res = "jina-v2-de"
+        if chkhsh == "cdf5f35325780597efd76153d4d1c16778f766173908894c04afc20108536267":
+            # ref: https://huggingface.co/zai-org/GLM-4.7-Flash
+            res = "glm4"
         if chkhsh == "0ef9807a4087ebef797fc749390439009c3b9eda9ad1a097abbe738f486c01e5":
             # ref: https://huggingface.co/meta-llama/Meta-Llama-3-8B
             res = "llama-bpe"
@@ -5091,277 +5090,6 @@ class CodeShellModel(TextModel):
         self.gguf_writer.add_rope_scaling_factor(1.0)
 
 
-@ModelBase.register("KimiLinearModel", "KimiLinearForCausalLM")
-class KimiLinearModel(TextModel):
-    """Kimi-Linear model with hybrid MLA+KDA architecture"""
-    model_arch = gguf.MODEL_ARCH.KIMI_LINEAR
-
-    _experts: list[dict[str, Tensor]] | None = None
-
-    def set_vocab(self):
-        try:
-            self._set_vocab_gpt2()
-            return
-        except Exception:
-            pass
-
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(self.dir_model, trust_remote_code=True)
-        tokpre = self.get_vocab_base_pre(tokenizer)
-
-        if tokpre == "kimi-k2":
-            # Build merges list using the approach similar to HunYuanMoE
-            merges = []
-            vocab = {}
-            mergeable_ranks = tokenizer.model._mergeable_ranks
-            for token, rank in mergeable_ranks.items():
-                vocab[QwenModel.token_bytes_to_string(token)] = rank
-                if len(token) == 1:
-                    continue
-                merged = QwenModel.bpe(mergeable_ranks, token, max_rank=rank)
-                if len(merged) == 2:
-                    merges.append(' '.join(map(QwenModel.token_bytes_to_string, merged)))
-            # Build token list
-            vocab_size = self.hparams["vocab_size"]
-            special_tokens = tokenizer.special_tokens
-            reverse_vocab = {id_ : encoded_tok for encoded_tok, id_ in {**vocab, **special_tokens}.items()}
-            tokens: list[str] = []
-            toktypes: list[int] = []
-
-            for i in range(vocab_size):
-                if i not in reverse_vocab:
-                    tokens.append(f"[PAD{i}]")
-                    toktypes.append(gguf.TokenType.UNUSED)
-                else:
-                    token = reverse_vocab[i]
-                    tokens.append(token)
-                    if i in special_tokens.values():
-                        toktypes.append(gguf.TokenType.CONTROL)
-                    else:
-                        toktypes.append(gguf.TokenType.NORMAL)
-
-            self.gguf_writer.add_tokenizer_model("gpt2")
-            self.gguf_writer.add_tokenizer_pre(tokpre)
-            self.gguf_writer.add_token_list(tokens)
-            self.gguf_writer.add_token_types(toktypes)
-            self.gguf_writer.add_token_merges(merges)
-
-            special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=False)
-            special_vocab.add_to_gguf(self.gguf_writer)
-            # override eos id in config.json with tiktoken eos id
-            self.gguf_writer.add_eos_token_id(tokenizer.eos_id)
-        else:
-            raise NotImplementedError(f"Deepseek pre-tokenizer {tokpre!r} is not supported yet!")
-
-    def set_gguf_parameters(self):
-        # note: To enable MLA KV cache, attention needs to be converted into MQA (ie: GQA with 1 group)
-        self.hparams["num_key_value_heads"] = 1
-
-        super().set_gguf_parameters()
-        self.gguf_writer.add_vocab_size(self.hparams["vocab_size"])
-        self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
-
-        # Use find_hparam for context length
-        # Kimi uses model_max_length
-        n_ctx = self.find_hparam(["max_position_embeddings", "model_max_length", "n_ctx", "n_positions"], optional=True)
-        if n_ctx is not None:
-            self.gguf_writer.add_context_length(n_ctx)
-        else:
-            # Default to 4096 if not found
-            logger.warning("No context length found in config, defaulting to 4096")
-            self.gguf_writer.add_context_length(4096)
-
-        # KDA & MLA params
-        # Get ssm_d_conv from linear_attn_config.short_conv_kernel_size or ssm_d_conv
-        linear_attn_config = self.hparams.get("linear_attn_config", {})
-        # n_head == 0 for KDA layers, n_head > 0 for MLA layers
-        # full_attention_layers list will be used to distingush layer type
-        _num_kv_heads = list()
-        _full_attn_layers = linear_attn_config["full_attn_layers"]
-        for il in range(self.hparams["num_hidden_layers"]):
-            if il + 1 in _full_attn_layers:
-                _num_kv_heads.append(self.hparams["num_key_value_heads"])
-            else:
-                _num_kv_heads.append(0)
-        assert len(_num_kv_heads) == self.hparams["num_hidden_layers"]
-        self.gguf_writer.add_head_count_kv(_num_kv_heads)
-
-        ssm_d_conv = self.hparams.get("ssm_d_conv") or linear_attn_config.get("short_conv_kernel_size")
-        if ssm_d_conv is not None:
-            self.gguf_writer.add_ssm_conv_kernel(ssm_d_conv)
-        kda_head_dim = self.hparams.get("kda_head_dim") or linear_attn_config.get("head_dim")
-        if kda_head_dim is not None:
-            self.gguf_writer.add_kda_head_dim(kda_head_dim)
-
-        # MLA params - use add_* methods that handle arch substitution
-        # Support both HuggingFace naming (q_lora_rank, kv_lora_rank) and internal naming (n_lora_q, n_lora_kv)
-        q_lora_rank = self.hparams.get("q_lora_rank", self.hparams.get("n_lora_q"))
-        kv_lora_rank = self.hparams.get("kv_lora_rank", self.hparams.get("n_lora_kv"))
-
-        if q_lora_rank is not None:
-            self.gguf_writer.add_q_lora_rank(q_lora_rank)
-        if kv_lora_rank is not None:
-            self.gguf_writer.add_kv_lora_rank(kv_lora_rank)
-
-        # MLA head dimensions
-        # Support HuggingFace naming: qk_nope_head_dim, qk_rope_head_dim, v_head_dim
-        qk_nope_head_dim = self.hparams.get("qk_nope_head_dim")
-        qk_rope_head_dim = self.hparams.get("qk_rope_head_dim")
-        v_head_dim = self.hparams.get("v_head_dim")
-        # To enable MLA KV cache, MLA needs to be converted into MQA with larger heads, then decompresses to MHA
-        self.gguf_writer.add_key_length(self.hparams["kv_lora_rank"] + self.hparams["qk_rope_head_dim"])
-        self.gguf_writer.add_value_length(self.hparams["kv_lora_rank"])
-
-        # Calculate n_embd_head_k_mla = qk_nope_head_dim + qk_rope_head_dim
-        if "n_embd_head_k_mla" in self.hparams:
-            self.gguf_writer.add_key_length_mla(self.hparams["n_embd_head_k_mla"])
-        elif qk_nope_head_dim is not None and qk_rope_head_dim is not None:
-            n_embd_head_k_mla = qk_nope_head_dim + qk_rope_head_dim
-            self.gguf_writer.add_key_length_mla(n_embd_head_k_mla)
-
-        # n_embd_head_v_mla = v_head_dim
-        if "n_embd_head_v_mla" in self.hparams:
-            self.gguf_writer.add_value_length_mla(self.hparams["n_embd_head_v_mla"])
-        elif v_head_dim is not None:
-            self.gguf_writer.add_value_length_mla(v_head_dim)
-
-        # Rotation - use qk_rope_head_dim for Kimi
-        rope_dim = self.hparams.get("qk_rope_head_dim") or self.hparams.get("n_rot")
-        if rope_dim is not None:
-            self.gguf_writer.add_rope_dimension_count(rope_dim)
-        else:
-            # Default to head_dim
-            head_dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
-            self.gguf_writer.add_rope_dimension_count(head_dim)
-
-        # Copied from Qwen2Moe as this model inherits parts of it
-        # YaRN is not enabled by default
-        # To enable it, please refer to this guide: https://huggingface.co/Qwen/Qwen3-30B-A3B#processing-long-texts
-        rope_scaling = self.hparams.get("rope_scaling") or {}
-        if rope_scaling.get("rope_type", rope_scaling.get("type")) == "yarn" and "factor" in rope_scaling:
-            self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.YARN)
-            self.gguf_writer.add_rope_scaling_factor(rope_scaling["factor"])
-            self.gguf_writer.add_rope_scaling_orig_ctx_len(rope_scaling["original_max_position_embeddings"])
-
-        # MoE params
-        n_experts = self.hparams.get("num_local_experts", self.hparams.get("num_experts"))
-        if n_experts is not None:
-            self.gguf_writer.add_expert_count(n_experts)
-        # Support both num_experts_per_tok and num_experts_per_token
-        n_experts_used = self.hparams.get("num_experts_per_tok", self.hparams.get("num_experts_per_token"))
-        if n_experts_used is not None:
-            self.gguf_writer.add_expert_used_count(n_experts_used)
-
-        # moe_intermediate_size (1024 for Kimi)
-        moe_intermediate_size = self.hparams.get("moe_intermediate_size")
-        if moe_intermediate_size is not None:
-            self.gguf_writer.add_expert_feed_forward_length(moe_intermediate_size)
-
-        # num_shared_experts (1 for Kimi)
-        num_shared_experts = self.hparams.get("num_shared_experts")
-        if num_shared_experts is not None:
-            self.gguf_writer.add_expert_shared_count(num_shared_experts)
-
-        # first_k_dense_replace (1 for Kimi - first layer uses dense MLP)
-        first_k_dense_replace = self.hparams.get("first_k_dense_replace")
-        if first_k_dense_replace is not None:
-            self.gguf_writer.add_leading_dense_block_count(first_k_dense_replace)
-
-        # Routed scaling factor (expert_weights_scale = 2.446 for Kimi)
-        routed_scaling_factor = self.hparams.get("routed_scaling_factor")
-        if routed_scaling_factor is not None:
-            self.gguf_writer.add_expert_weights_scale(routed_scaling_factor)
-
-    def prepare_tensors(self):
-        super().prepare_tensors()
-        if self._experts is not None:
-            experts = [k for d in self._experts for k in d.keys()]
-            if len(experts) > 0:
-                raise ValueError(f"Unprocessed experts: {experts}")
-
-    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        logger.info(f"Processing {name}: shape before = {tuple(data_torch.shape)}")
-
-        # Handle KDA conv1d weights
-        # HuggingFace/vLLM stores as [d_inner, d_conv] (2D), memory layout: conv_step changes fastest
-        # llama.cpp expects ggml ne = [d_conv, 1, d_inner, 1], memory layout: ne[0]=d_conv changes fastest
-        # GGUF reverses numpy shape when writing, so numpy (1, d_inner, 1, d_conv) -> ggml ne = [d_conv, 1, d_inner, 1]
-        # Memory layouts match: both have conv_step (d_conv) changing fastest
-        if name.endswith((".q_conv1d.weight", ".k_conv1d.weight", ".v_conv1d.weight")):
-            # HF shape: [d_inner, d_conv] e.g. [4096, 4]
-            # Target numpy shape: (1, d_inner, 1, d_conv) -> ggml ne = [d_conv, 1, d_inner, 1]
-            if data_torch.ndim == 2:
-                d_inner, d_conv = data_torch.shape
-                # Reshape to (1, d_inner, 1, d_conv) - memory layout preserved (d_conv fastest)
-                data_torch = data_torch.reshape(1, d_inner, 1, d_conv)
-                logger.info(f"Reshaped conv1d weight {name}: [d_inner={d_inner}, d_conv={d_conv}] -> numpy {tuple(data_torch.shape)} -> ggml ne=[{d_conv}, 1, {d_inner}, 1]")
-            elif data_torch.ndim == 3:
-                # Already 3D [d_inner, 1, d_conv] from unsqueeze
-                d_inner, _, d_conv = data_torch.shape
-                data_torch = data_torch.reshape(1, d_inner, 1, d_conv)
-                logger.info(f"Reshaped conv1d weight {name}: [d_inner={d_inner}, 1, d_conv={d_conv}] -> numpy {tuple(data_torch.shape)} -> ggml ne=[{d_conv}, 1, {d_inner}, 1]")
-
-        # Handle A_log: HF stores as [1, 1, num_heads, 1]
-        # llama.cpp expects ggml ne = [1, num_heads, 1, 1]
-        # GGUF reverses numpy shape: numpy (1, 1, num_heads, 1) -> ggml ne = [1, num_heads, 1, 1]
-        # So no transformation needed! The shapes already match after GGUF reversal.
-        if name.endswith(".A_log"):
-            if data_torch.ndim == 4:
-                logger.info(f"A_log {name}: numpy {tuple(data_torch.shape)} -> ggml ne={list(reversed(data_torch.shape))}")
-
-        # Kimi specific bias
-        if name.endswith("e_score_correction_bias"):
-            new_name = self.format_tensor_name(gguf.MODEL_TENSOR.FFN_EXP_PROBS_B, bid)
-            return [(new_name, data_torch)]
-
-        # process the experts separately
-        if name.find("block_sparse_moe.experts") != -1:
-            n_experts = self.hparams.get("num_local_experts", self.hparams.get("num_experts"))
-            assert bid is not None
-
-            if self._experts is None:
-                self._experts = [{} for _ in range(self.block_count)]
-
-            self._experts[bid][name] = data_torch
-
-            if len(self._experts[bid]) >= n_experts * 3:
-                # merge the experts into a single 3d tensor
-                tensors = []
-                # w1: gate, w2: down, w3: up
-                for wid, tname in [("w1", gguf.MODEL_TENSOR.FFN_GATE_EXP),
-                                   ("w2", gguf.MODEL_TENSOR.FFN_DOWN_EXP),
-                                   ("w3", gguf.MODEL_TENSOR.FFN_UP_EXP)]:
-                    datas: list[Tensor] = []
-                    for xid in range(n_experts):
-                        ename = f"model.layers.{bid}.block_sparse_moe.experts.{xid}.{wid}.weight"
-                        datas.append(self._experts[bid][ename])
-                        del self._experts[bid][ename]
-
-                    data_torch = torch.stack(datas, dim=0)
-                    new_name = self.format_tensor_name(tname, bid)
-                    tensors.append((new_name, data_torch))
-                return tensors
-            return []
-
-        # note: MLA with the absorption optimization, needs these two split and k_b_proj transposed
-        if name.endswith("kv_b_proj.weight"):
-            name_kb = name.replace("kv_b_proj", "k_b_proj")
-            name_vb = name.replace("kv_b_proj", "v_b_proj")
-            n_head_kv = self.hparams["num_key_value_heads"]
-            v_head_dim = self.hparams["v_head_dim"]
-            qk_nope_head_dim = self.hparams["qk_nope_head_dim"]
-            logger.info("Split kv_b n_head_kv %d\n" % n_head_kv)
-            assert data_torch.shape[0] == n_head_kv * (v_head_dim + qk_nope_head_dim)
-            kv_b = data_torch.view(n_head_kv, v_head_dim + qk_nope_head_dim, data_torch.shape[-1])
-            k_b, v_b = torch.split(kv_b, [qk_nope_head_dim, v_head_dim], dim=1)
-            k_b = k_b.transpose(1, 2)
-            return [(self.map_tensor_name(name_kb), k_b), (self.map_tensor_name(name_vb), v_b)]
-
-        mapped_name = self.map_tensor_name(name)
-        logger.info(f"Returning {mapped_name}: shape after = {tuple(data_torch.shape)}")
-        return [(mapped_name, data_torch)]
-
-
 @ModelBase.register("InternLM2ForCausalLM")
 class InternLM2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.INTERNLM2
@@ -7733,6 +7461,7 @@ class DeepseekModel(TextModel):
     "DeepseekV3ForCausalLM",
     "KimiVLForConditionalGeneration",
     "YoutuForCausalLM",
+    "YoutuVLForConditionalGeneration",
 )
 class DeepseekV2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.DEEPSEEK2
@@ -8720,6 +8449,32 @@ class Glm4MoeModel(TextModel):
                 raise ValueError(f"Unprocessed experts: {experts}")
 
 
+@ModelBase.register("Glm4MoeLiteForCausalLM")
+class Glm4MoeLiteModel(DeepseekV2Model):
+    model_arch = gguf.MODEL_ARCH.DEEPSEEK2
+
+    # copied from Glm4MoeModel
+    def set_vocab(self):
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(self.dir_model)
+        special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=True)
+        tokens, toktypes, tokpre = self.get_vocab_base()
+        self.gguf_writer.add_tokenizer_model("gpt2")
+        self.gguf_writer.add_tokenizer_pre(tokpre)
+        self.gguf_writer.add_token_list(tokens)
+        self.gguf_writer.add_token_types(toktypes)
+
+        # Special tokens
+        # Note: Using <|endoftext|> (151329) for eot causes endless generation
+        special_vocab._set_special_token("bos", tokenizer.get_added_vocab()["[gMASK]"])  # 151331
+        special_vocab._set_special_token("eot", tokenizer.get_added_vocab()["<|user|>"])  # 151336
+        special_vocab._set_special_token("unk", tokenizer.get_added_vocab()["<|endoftext|>"]) # 151329
+        special_vocab._set_special_token("eom", tokenizer.get_added_vocab()["<|observation|>"])  # 151338
+
+        special_vocab.add_to_gguf(self.gguf_writer)
+
+
 @ModelBase.register("GlmForCausalLM", "ChatGLMModel", "ChatGLMForConditionalGeneration")
 class ChatGLMModel(TextModel):
     model_arch = gguf.MODEL_ARCH.CHATGLM
@@ -9046,11 +8801,7 @@ class ExaoneMoEModel(Exaone4Model):
         self.gguf_writer.add_expert_weights_norm(self.hparams["norm_topk_prob"])
         n_dense_layer = self.hparams.get("first_k_dense_replace", self.hparams.get("first_last_k_dense_replace", 0))
         self.gguf_writer.add_leading_dense_block_count(n_dense_layer)
-        # For here, we hard-code the number of NextN/MTP layers to 1 for K-EXAONE,
-        # so that we can convert MTP weights to GGUF format for speculative decoding.
-        # This is because HF config of K-EXAONE does not have `num_nextn_predict_layers` at now.
-        # Will be updated when HF config is updated.
-        self.gguf_writer.add_nextn_predict_layers(self.hparams.get("num_nextn_predict_layers", 1))
+        self.gguf_writer.add_nextn_predict_layers(self.hparams.get("num_nextn_predict_layers", 0))
 
         self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.NONE)
 
@@ -9461,7 +9212,7 @@ class NemotronHModel(GraniteHybridModel):
                 return [(mapped_name, reshaped_data)]
 
             if name.endswith("mixer.norm.weight"):
-                reshaped_data = data_torch.reshape(8, 512)
+                reshaped_data = data_torch.reshape(self.n_group, -1)
                 mapped_name = self.map_tensor_name(name)
                 return [(mapped_name, reshaped_data)]
 
@@ -10573,6 +10324,27 @@ class LFM2Model(TextModel):
         return "vision_tower" in name or "multi_modal_projector" in name
 
 
+@ModelBase.register("Lfm2Model")
+class LFM2ColBertModel(LFM2Model):
+    model_arch = gguf.MODEL_ARCH.LFM2
+    dense_tensor_name = "dense_2"
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if not name.startswith(self.dense_tensor_name):
+            name = "model." + name
+
+        return super().modify_tensors(data_torch, name, bid)
+
+    def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
+        # dense tensor is stored in a separate safetensors file
+        from safetensors.torch import load_file
+        tensors_file = self.dir_model / "1_Dense" / "model.safetensors"
+        assert tensors_file.is_file()
+        tensor = load_file(tensors_file)["linear.weight"]
+        self.gguf_writer.add_embedding_length_out(tensor.shape[0])
+        yield f"{self.dense_tensor_name}.weight", tensor.clone()
+
+
 @ModelBase.register("Lfm2MoeForCausalLM")
 class LFM2MoeModel(TextModel):
     model_arch = gguf.MODEL_ARCH.LFM2MOE
@@ -11252,8 +11024,8 @@ class JanusProVisionModel(MmprojModel):
         return []
 
 
-@ModelBase.register("YOUTUVLForConditionalGeneration", "YOUTUVLForCausalLM")
-class YOUTUVLVisionModel(MmprojModel):
+@ModelBase.register("YoutuVLForConditionalGeneration")
+class YoutuVLVisionModel(MmprojModel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         assert self.hparams_vision is not None
@@ -11530,8 +11302,8 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--sentence-transformers-dense-modules", action="store_true",
-        help=("Whether to include sentence-transformers dense modules."
-              "It can be used for sentence-transformers models, like google/embeddinggemma-300m"
+        help=("Whether to include sentence-transformers dense modules. "
+              "It can be used for sentence-transformers models, like google/embeddinggemma-300m. "
               "Default these modules are not included.")
     )
 
