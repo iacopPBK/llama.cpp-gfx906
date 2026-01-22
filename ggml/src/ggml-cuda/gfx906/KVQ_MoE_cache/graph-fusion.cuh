@@ -10,6 +10,21 @@
 
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
 
+// Debug flag for fusion diagnostics (host-side only, GFX906 doesn't support device printf)
+static bool gfx906_fusion_debug_init = false;
+static bool gfx906_fusion_debug = false;
+
+static inline void init_fusion_debug() {
+    if (!gfx906_fusion_debug_init) {
+        gfx906_fusion_debug = (getenv("GGML_CUDA_Q8_CACHE_DEBUG") != nullptr);
+        gfx906_fusion_debug_init = true;
+        if (gfx906_fusion_debug) {
+            fprintf(stderr, "[GFX906_Q8_FUSION] Fusion system initialized (compile-time enabled)\n");
+            fflush(stderr);
+        }
+    }
+}
+
 // Try to detect and handle multi-consumer RMS_NORM + MUL + MUL_MAT fusion.
 // Returns true if fusion was applied (caller should skip node), false otherwise.
 static inline bool try_rms_mul_mmq_fusion(
@@ -19,10 +34,17 @@ static inline bool try_rms_mul_mmq_fusion(
     bool use_cuda_graph,
     bool cuda_graph_update_required
 ) {
+    init_fusion_debug();
+
     ggml_tensor* node = cgraph->nodes[node_idx];
 
     if (node->op != GGML_OP_RMS_NORM || node_idx + 1 >= cgraph->n_nodes) {
         return false;
+    }
+
+    if (gfx906_fusion_debug) {
+        fprintf(stderr, "[GFX906_Q8_FUSION] Found RMS_NORM at node %d: %s\n", node_idx, node->name);
+        fflush(stderr);
     }
 
     ggml_tensor* rms_norm = node;
@@ -32,25 +54,50 @@ static inline bool try_rms_mul_mmq_fusion(
     bool mul_pattern = (mul->op == GGML_OP_MUL) &&
                        (mul->src[0] == rms_norm || mul->src[1] == rms_norm);
     if (!mul_pattern) {
+        if (gfx906_fusion_debug) {
+            fprintf(stderr, "[GFX906_Q8_FUSION]   -> next node is %s (%s), not MUL pattern\n",
+                    ggml_op_name(mul->op), mul->name);
+            fflush(stderr);
+        }
         return false;
+    }
+
+    if (gfx906_fusion_debug) {
+        fprintf(stderr, "[GFX906_Q8_FUSION]   -> MUL pattern found: %s\n", mul->name);
+        fflush(stderr);
     }
 
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
 
     // Find ALL MUL_MAT consumers of the MUL output
     std::vector<ggml_tensor*> mul_mat_consumers;
+    int total_mul_mat_checked = 0;
+    int mmq_rejected = 0;
     for (int j = node_idx + 2; j < cgraph->n_nodes; j++) {
         ggml_tensor* other = cgraph->nodes[j];
         if (other->op == GGML_OP_MUL_MAT && other->src[1] == mul) {
+            total_mul_mat_checked++;
             const ggml_tensor* weights = other->src[0];
             if (ggml_cuda_should_use_mmq(weights->type, cc, other->ne[1], 1)) {
                 mul_mat_consumers.push_back(other);
+            } else {
+                mmq_rejected++;
             }
         }
     }
 
+    if (gfx906_fusion_debug) {
+        fprintf(stderr, "[GFX906_Q8_FUSION]   -> MUL_MAT consumers: found=%zu (checked=%d, mmq_rejected=%d)\n",
+                mul_mat_consumers.size(), total_mul_mat_checked, mmq_rejected);
+        fflush(stderr);
+    }
+
     // Need at least 2 consumers for multi-consumer fusion to be worthwhile
     if (mul_mat_consumers.size() < 2) {
+        if (gfx906_fusion_debug) {
+            fprintf(stderr, "[GFX906_Q8_FUSION]   -> REJECTED: need >= 2 consumers\n");
+            fflush(stderr);
+        }
         return false;
     }
 
@@ -99,6 +146,15 @@ static inline bool try_rms_mul_mmq_fusion(
     const int64_t nrows = ggml_nrows(input);
     const size_t q8_buffer_size = ggml_cuda_get_q8_1_buffer_size(ncols, nrows, cc);
 
+    if (gfx906_fusion_debug) {
+        fprintf(stderr, "[GFX906_Q8_FUSION] APPLYING FUSION: rms=%s mul=%s consumers=%zu\n",
+                rms_norm->name, mul->name, mul_mat_consumers.size());
+        fprintf(stderr, "[GFX906_Q8_FUSION]   input dims: [%ld,%ld,%ld,%ld] nrows=%ld buffer_size=%zu\n",
+                (long)input->ne[0], (long)input->ne[1], (long)input->ne[2], (long)input->ne[3],
+                (long)nrows, q8_buffer_size);
+        fflush(stderr);
+    }
+
     // Allocate Q8_1 buffer
     auto pool_alloc = std::make_unique<ggml_cuda_pool_alloc<char>>();
     pool_alloc->alloc(cuda_ctx->pool(), q8_buffer_size);
@@ -119,6 +175,12 @@ static inline bool try_rms_mul_mmq_fusion(
     // Store in map for MUL_MAT consumers to use
     cuda_ctx->fusion_prequant_map[mul] = info;
     cuda_ctx->fusion_handled_mul_nodes.insert(mul);
+
+    if (gfx906_fusion_debug) {
+        fprintf(stderr, "[GFX906_Q8_FUSION] Fusion applied, buffer=%p map_size=%zu\n",
+                (void*)buffer_ptr, cuda_ctx->fusion_prequant_map.size());
+        fflush(stderr);
+    }
 
     return true;
 }
@@ -147,7 +209,17 @@ static inline bool try_prequantized_mul_mat(ggml_backend_cuda_context* cuda_ctx,
     // Verify dimensions match
     if (info.ne10 != node->src[1]->ne[0] || info.ne11 != node->src[1]->ne[1] ||
         info.ne12 != node->src[1]->ne[2] || info.ne13 != node->src[1]->ne[3]) {
+        if (gfx906_fusion_debug) {
+            fprintf(stderr, "[GFX906_Q8_FUSION] PREQUANT dimension mismatch for %s, using regular path\n",
+                    node->name);
+            fflush(stderr);
+        }
         return false;  // Dimension mismatch, fall through to regular path
+    }
+
+    if (gfx906_fusion_debug) {
+        fprintf(stderr, "[GFX906_Q8_FUSION] Using PREQUANTIZED path for MUL_MAT: %s\n", node->name);
+        fflush(stderr);
     }
 
     // Use prequantized path
@@ -158,6 +230,14 @@ static inline bool try_prequantized_mul_mat(ggml_backend_cuda_context* cuda_ctx,
 
 // Clear fusion state at start of graph compute
 static inline void clear_fusion_state(ggml_backend_cuda_context* cuda_ctx) {
+    init_fusion_debug();
+    if (gfx906_fusion_debug && !cuda_ctx->fusion_q8_buffers.empty()) {
+        fprintf(stderr, "[GFX906_Q8_FUSION] Clearing fusion state: buffers=%zu map=%zu handled=%zu\n",
+                cuda_ctx->fusion_q8_buffers.size(),
+                cuda_ctx->fusion_prequant_map.size(),
+                cuda_ctx->fusion_handled_mul_nodes.size());
+        fflush(stderr);
+    }
     cuda_ctx->fusion_prequant_map.clear();
     cuda_ctx->fusion_handled_mul_nodes.clear();
     cuda_ctx->fusion_q8_buffers.clear();

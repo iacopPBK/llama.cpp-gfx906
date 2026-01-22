@@ -3285,6 +3285,13 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
         // With the use of CUDA graphs, the execution will be performed by the graph launch.
         if (!use_cuda_graph || cuda_graph_update_required) {
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
+            // IMPORTANT: Sync stream before clearing fusion state to ensure all kernels
+            // using the prequantized buffers have completed. Without this, we might free
+            // buffers while async kernels are still accessing them.
+            // NOTE: Only sync when NOT using CUDA graphs (sync breaks graph capture).
+            if (!cuda_ctx->fusion_q8_buffers.empty() && !use_cuda_graph) {
+                CUDA_CHECK(cudaStreamSynchronize(cuda_ctx->stream()));
+            }
             // Clear fusion state at the start of each graph evaluation
             clear_fusion_state(cuda_ctx);
 #endif
