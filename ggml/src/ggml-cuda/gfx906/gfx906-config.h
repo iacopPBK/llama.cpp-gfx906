@@ -23,4 +23,8 @@
 #define GFX906_FATTN_TILE_SIZE_DEFAULT 128
 #define GFX906_Q8_SCALE_HOISTING 1
 
+// Q8_1 activation caching for KV projections and MoE routing
+// Reduces quantize_mmq_q8_1 kernel launches by caching quantized activations
+#define GFX906_KVQ_MOE_CACHE_ENABLED 0
+
 #endif // GGML_USE_HIP
