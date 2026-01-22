@@ -547,6 +547,10 @@ ggml_backend_cuda_context::~ggml_backend_cuda_context() {
     std::unique_lock<std::mutex> lock(ggml_cuda_lock);
     ggml_cuda_lock_cv.wait(lock, []{ return ggml_cuda_lock_counter.load(std::memory_order_relaxed) == 0; });
 
+#if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
+    q8_cache.free_all();
+#endif
+
     if (copy_event != nullptr) {
         CUDA_CHECK(cudaEventDestroy(copy_event));
     }

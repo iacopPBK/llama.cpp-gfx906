@@ -27,7 +27,15 @@
 #include <cstdio>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+
+#if defined(GGML_USE_HIP)
+#include "gfx906/gfx906-config.h"
+#if GFX906_KVQ_MOE_CACHE_ENABLED
+#include "gfx906/KVQ_MoE_cache/q8-cache.cuh"
+#endif
+#endif
 
 #if defined(GGML_USE_HIP)
 #include "vendors/hip.h"
@@ -1420,6 +1428,15 @@ struct ggml_backend_cuda_context {
     ggml_cuda_pool & pool() {
         return pool(device);
     }
+
+#if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
+    q8_hashmap_cache q8_cache;
+    std::unordered_map<const ggml_tensor*, prequantized_q8_info> fusion_prequant_map;
+    std::unordered_set<const ggml_tensor*> fusion_handled_mul_nodes;
+    std::vector<std::unique_ptr<ggml_cuda_pool_alloc<char>>> fusion_q8_buffers;
+
+    void clear_q8_cache() { q8_cache.clear(); }
+#endif
 };
 
 struct ggml_cuda_mm_fusion_args_host {
