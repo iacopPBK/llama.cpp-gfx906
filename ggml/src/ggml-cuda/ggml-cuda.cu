@@ -60,6 +60,11 @@
 #include "ggml-cuda/tri.cuh"
 #include "ggml-cuda/cumsum.cuh"
 #include "ggml-cuda/fill.cuh"
+
+#if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
+#include "ggml-cuda/gfx906/KVQ_MoE_cache/graph-fusion.cuh"
+#endif
+
 #include "ggml.h"
 
 #include <algorithm>
@@ -3279,6 +3284,10 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
         // Only perform the graph execution if CUDA graphs are not enabled, or we are capturing the graph.
         // With the use of CUDA graphs, the execution will be performed by the graph launch.
         if (!use_cuda_graph || cuda_graph_update_required) {
+#if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
+            // Clear fusion state at the start of each graph evaluation
+            clear_fusion_state(cuda_ctx);
+#endif
             [[maybe_unused]] int prev_i = 0;
 
             if (stream_ctx.concurrent_events.size() > 0) {
@@ -3394,6 +3403,15 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 // start of fusion operations
                 static bool disable_fusion = (getenv("GGML_CUDA_DISABLE_FUSION") != nullptr);
                 if (!disable_fusion) {
+
+#if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
+                    // GFX906 RMS_NORM + MUL + multi-consumer MUL_MAT fusion
+                    if (try_rms_mul_mmq_fusion(cuda_ctx, cgraph, i, use_cuda_graph, cuda_graph_update_required)) {
+                        // RMS_NORM node was fused, continue to next node
+                        // The MUL and MUL_MAT consumers will be handled separately
+                        continue;
+                    }
+#endif
 
                     if (ggml_cuda_can_fuse(cgraph, i, ggml_cuda_topk_moe_ops(/*with norm*/ true), {})) {
                         ggml_tensor * weights          = cgraph->nodes[i + 9];
@@ -3673,6 +3691,19 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                         continue;
                     }
                 }
+
+#if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
+                // Skip MUL nodes that were already handled by RMS+MUL+MMQ fusion
+                if (is_mul_handled_by_fusion(cuda_ctx, node)) {
+                    continue;
+                }
+
+                // Try to use prequantized data for MUL_MAT operations
+                if (try_prequantized_mul_mat(cuda_ctx, node)) {
+                    continue;
+                }
+#endif
+
 #ifndef NDEBUG
                 assert(node->buffer->buft == ggml_backend_cuda_buffer_type(cuda_ctx->device));
                 for (int j = 0; j < GGML_MAX_SRC; j++) {
