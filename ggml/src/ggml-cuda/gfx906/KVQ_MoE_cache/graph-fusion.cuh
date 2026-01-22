@@ -229,6 +229,8 @@ static inline bool try_prequantized_mul_mat(ggml_backend_cuda_context* cuda_ctx,
 }
 
 // Clear fusion state at start of graph compute
+// NOTE: This does NOT clear q8_cache - that's a separate cache used by mmq.cu
+// and needs to persist through the graph evaluation for cross-op reuse
 static inline void clear_fusion_state(ggml_backend_cuda_context* cuda_ctx) {
     init_fusion_debug();
     if (gfx906_fusion_debug && !cuda_ctx->fusion_q8_buffers.empty()) {
@@ -241,7 +243,8 @@ static inline void clear_fusion_state(ggml_backend_cuda_context* cuda_ctx) {
     cuda_ctx->fusion_prequant_map.clear();
     cuda_ctx->fusion_handled_mul_nodes.clear();
     cuda_ctx->fusion_q8_buffers.clear();
-    cuda_ctx->clear_q8_cache();
+    // NOTE: q8_cache.clear() is called separately at graph_compute END,
+    // NOT here - the hashmap cache needs to persist during graph evaluation
 }
 
 #endif // GGML_USE_HIP && GFX906_KVQ_MOE_CACHE_ENABLED
