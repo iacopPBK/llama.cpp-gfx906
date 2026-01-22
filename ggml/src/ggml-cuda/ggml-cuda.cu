@@ -3257,8 +3257,6 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
     const bool integrated            = ggml_cuda_info().devices[cuda_ctx->device].integrated;
 
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
-    // Clear Q8_1 hashmap cache at start of graph evaluation.
-    // The cache is populated during graph evaluation and reused within the same iteration.
     cuda_ctx->clear_q8_cache();
 #endif
 
@@ -3291,14 +3289,10 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
         // With the use of CUDA graphs, the execution will be performed by the graph launch.
         if (!use_cuda_graph || cuda_graph_update_required) {
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
-            // IMPORTANT: Sync stream before clearing fusion state to ensure all kernels
-            // using the prequantized buffers have completed. Without this, we might free
-            // buffers while async kernels are still accessing them.
-            // NOTE: Only sync when NOT using CUDA graphs (sync breaks graph capture).
+            // Sync before clearing fusion buffers (skip during graph capture)
             if (!cuda_ctx->fusion_q8_buffers.empty() && !use_cuda_graph) {
                 CUDA_CHECK(cudaStreamSynchronize(cuda_ctx->stream()));
             }
-            // Clear fusion state at the start of each graph evaluation
             clear_fusion_state(cuda_ctx);
 #endif
             [[maybe_unused]] int prev_i = 0;
@@ -3418,10 +3412,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 if (!disable_fusion) {
 
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
-                    // GFX906 RMS_NORM + MUL + multi-consumer MUL_MAT fusion
                     if (try_rms_mul_mmq_fusion(cuda_ctx, cgraph, i, use_cuda_graph, cuda_graph_update_required)) {
-                        // RMS_NORM node was fused, continue to next node
-                        // The MUL and MUL_MAT consumers will be handled separately
                         continue;
                     }
 #endif
@@ -3706,12 +3697,9 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 }
 
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
-                // Skip MUL nodes that were already handled by RMS+MUL+MMQ fusion
                 if (is_mul_handled_by_fusion(cuda_ctx, node)) {
                     continue;
                 }
-
-                // Try to use prequantized data for MUL_MAT operations
                 if (try_prequantized_mul_mat(cuda_ctx, node)) {
                     continue;
                 }

@@ -1,6 +1,4 @@
-// MoE Q8_1 gather kernel - gathers selected rows from cached quantized data.
-// Source layout (interleaved): block k of row r in slice s at src[s*(ne11*n_blocks) + k*ne11 + r]
-// Output layout: block k of row r at dst[k*n_dst_rows + r]
+// MoE Q8_1 gather kernel - gathers selected rows from cached quantized data
 
 #include "gather-q8.cuh"
 

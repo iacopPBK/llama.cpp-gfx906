@@ -1,7 +1,6 @@
 #pragma once
 
-// Pre-quantized MMQ path: accepts already-quantized Q8_1 data, skipping quantization.
-// Used by KV/MoE caching to avoid redundant quantization kernel launches.
+// Pre-quantized MMQ path - accepts already-quantized Q8_1 data
 
 #include "../../mmq.cuh"
 

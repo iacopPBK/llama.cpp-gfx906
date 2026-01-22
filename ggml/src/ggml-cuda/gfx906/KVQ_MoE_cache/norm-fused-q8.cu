@@ -1,5 +1,4 @@
 // Fused RMS Norm + Q8_1 Quantization Kernel for GFX906
-// Memory bandwidth reduction: 292 -> 72 bytes per 32 values (75% reduction)
 
 #include "norm-fused-q8.cuh"
 
@@ -8,7 +7,6 @@
 #include "../gfx906-quantize-epilogue.cuh"
 #endif
 
-// Single-pass fused kernel: load data into LDS, compute RMS, normalize+quantize
 template <int block_size, mmq_q8_1_ds_layout ds_layout, bool do_multiply = false>
 __launch_bounds__(256, 8)
 static __global__ void rms_norm_f32_to_q8_1(
@@ -51,7 +49,6 @@ static __global__ void rms_norm_f32_to_q8_1(
     const int64_t ib0 = channel_idx * (nrows * blocks_per_row);
     block_q8_1_mmq* __restrict__ y_base = (block_q8_1_mmq*)vy + ib0;
 
-    // Phase 1: Load via float4, compute sum_sq, cache in LDS
     extern __shared__ float4 s_data4[];
     float* s_data = (float*)s_data4;
     __shared__ float s_reduce[32];
@@ -78,7 +75,6 @@ static __global__ void rms_norm_f32_to_q8_1(
     }
     __syncthreads();
 
-    // Warp + block reduction
 #if defined(GGML_USE_HIP) && defined(__gfx906__)
     sum_sq = gfx906_warp_reduce_sum_f32(sum_sq);
 #else
@@ -109,7 +105,6 @@ static __global__ void rms_norm_f32_to_q8_1(
     __syncthreads();
     rms_scale = s_reduce[0];
 
-    // Phase 2: Apply RMS norm, multiply, quantize
     constexpr int vals_per_iter = block_size * 4;
     const float4* __restrict__ mul4 = do_multiply ? (const float4*)mul_row : nullptr;
 
@@ -141,7 +136,6 @@ static __global__ void rms_norm_f32_to_q8_1(
             }
         }
 
-        // 8-thread reduction for quantization
         float amax = fmaxf(fmaxf(fabsf(v.x), fabsf(v.y)), fmaxf(fabsf(v.z), fabsf(v.w)));
         float sum = v.x + v.y + v.z + v.w;
 

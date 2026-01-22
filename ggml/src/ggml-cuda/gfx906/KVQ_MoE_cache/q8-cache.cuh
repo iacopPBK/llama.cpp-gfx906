@@ -1,7 +1,6 @@
 #pragma once
 
-// Q8_1 activation cache for GFX906 KV/MoE optimization.
-// Enables reusing quantized data across multiple MUL_MAT ops (Q/K/V projections).
+// Q8_1 activation cache for GFX906 - reuses quantized data across MUL_MAT ops
 
 #include <unordered_map>
 #include <unordered_set>
@@ -21,9 +20,8 @@
 #define Q8_CACHE_FREE(ptr) Q8_CACHE_CHECK(cudaFree(ptr))
 #endif
 
-struct ggml_tensor;  // Forward declaration
+struct ggml_tensor;
 
-// Cache key: (tensor_ptr, layout) - NOT data ptr (data ptr can be pool-reused)
 struct q8_cache_key {
     const ggml_tensor* src_tensor;
     int layout;
@@ -47,7 +45,7 @@ struct q8_cache_entry {
     int64_t ne13 = 0;
 };
 
-// Epoch-based buffer pool: buffers reusable after SAFE_EPOCH_DELAY graphs (no sync needed)
+// Epoch-based buffer pool: buffers reusable after SAFE_EPOCH_DELAY graphs
 struct q8_hashmap_cache {
     std::unordered_map<q8_cache_key, q8_cache_entry, q8_cache_key_hash> entries;
 
@@ -59,30 +57,23 @@ struct q8_hashmap_cache {
     std::vector<buffer_slot> buffer_pool;
 
     uint64_t current_epoch = 0;
-    size_t total_bytes = 0;
-    size_t hits = 0, misses = 0, allocs = 0, reuses = 0;
-
     static constexpr uint64_t SAFE_EPOCH_DELAY = 2;
 
     void clear() {
         entries.clear();
         current_epoch++;
-        hits = misses = allocs = reuses = 0;
     }
 
     void* get_buffer(size_t size) {
         for (auto& slot : buffer_pool) {
             if (slot.size >= size && current_epoch - slot.written_epoch >= SAFE_EPOCH_DELAY) {
                 slot.written_epoch = current_epoch;
-                reuses++;
                 return slot.ptr;
             }
         }
         void* ptr = nullptr;
         Q8_CACHE_MALLOC(&ptr, size);
         buffer_pool.push_back({ptr, size, current_epoch});
-        allocs++;
-        total_bytes += size;
         return ptr;
     }
 
@@ -92,11 +83,9 @@ struct q8_hashmap_cache {
         if (it != entries.end()) {
             const auto& e = it->second;
             if (e.ne10_padded == ne10p && e.ne11 == ne11 && e.ne12 == ne12 && e.ne13 == ne13) {
-                hits++;
                 return &e;
             }
         }
-        misses++;
         return nullptr;
     }
 
@@ -111,13 +100,10 @@ struct q8_hashmap_cache {
         }
         buffer_pool.clear();
         entries.clear();
-        current_epoch = total_bytes = 0;
+        current_epoch = 0;
     }
 
     size_t size() const { return entries.size(); }
-    size_t bytes() const { return total_bytes; }
-    size_t pool_size() const { return buffer_pool.size(); }
-    uint64_t epoch() const { return current_epoch; }
 };
 
 // Multi-consumer fusion info

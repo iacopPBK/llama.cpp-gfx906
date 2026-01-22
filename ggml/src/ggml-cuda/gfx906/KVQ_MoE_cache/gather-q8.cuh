@@ -1,7 +1,6 @@
 #pragma once
 
-// Gather selected rows from Q8_1 quantized tensor for MoE caching.
-// Handles interleaved layout from quantize_mmq_q8_1.
+// Gather selected rows from Q8_1 quantized tensor for MoE caching
 
 #include "../../common.cuh"
 

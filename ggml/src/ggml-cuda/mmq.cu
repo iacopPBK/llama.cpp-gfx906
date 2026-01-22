@@ -5,12 +5,6 @@
 
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
 #include "gfx906/KVQ_MoE_cache/gather-q8.cuh"
-
-// Debug logging for Q8 cache (set GGML_CUDA_Q8_CACHE_DEBUG=1 to enable)
-static bool q8_cache_debug = []() {
-    const char* val = getenv("GGML_CUDA_Q8_CACHE_DEBUG");
-    return val != nullptr && val[0] == '1';
-}();
 #endif
 
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
@@ -129,43 +123,25 @@ void ggml_cuda_mul_mat_q(
     const bool use_native_mxfp4 = blackwell_mma_available(cc) && src0->type == GGML_TYPE_MXFP4;
 
     if (!ids) {
-        // Regular MUL_MAT path (non-MoE) - uses q8_cache for reuse
+        // Regular MUL_MAT path - uses q8_cache for cross-op reuse
         const size_t nbytes_src1_q8_1 = ne13*ne12 * ne11*ne10_padded * sizeof(block_q8_1)/QK8_1 +
             get_mmq_x_max_host(cc)*sizeof(block_q8_1_mmq);
 
         const int layout = static_cast<int>(mmq_get_q8_1_ds_layout(src0->type));
 
         const char* src1_q8_1_ptr = nullptr;
-        ggml_cuda_pool_alloc<char> src1_q8_1_pool;  // Only used if caching disabled
+        ggml_cuda_pool_alloc<char> src1_q8_1_pool;
 
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
-        // Hashmap cache lookup
         if (!use_native_mxfp4) {
             const q8_cache_entry* cached = ctx.q8_cache.lookup(
                 src1, layout, ne10_padded, ne11, ne12, ne13);
 
             if (cached) {
-                // Cache HIT - reuse previously quantized data
                 src1_q8_1_ptr = static_cast<const char*>(cached->q8_data);
-                if (q8_cache_debug) {
-                    fprintf(stderr, "[Q8_CACHE] HIT: src0=%s src1=%s (entries=%zu, hits=%zu, misses=%zu)\n",
-                            src0->name, src1->name,
-                            ctx.q8_cache.size(), ctx.q8_cache.hits, ctx.q8_cache.misses);
-                    fflush(stderr);
-                }
             } else {
-                // Cache MISS - quantize and store in hashmap cache
-                if (q8_cache_debug) {
-                    fprintf(stderr, "[Q8_CACHE] MISS: src0=%s src1=%s (dims: %ld,%ld,%ld,%ld)\n",
-                            src0->name, src1->name,
-                            (long)ne10_padded, (long)ne11, (long)ne12, (long)ne13);
-                    fflush(stderr);
-                }
-
-                // Get buffer from pool (reuses existing or allocates new)
                 void* q8_data = ctx.q8_cache.get_buffer(nbytes_src1_q8_1);
 
-                // Quantize
                 const int64_t s11 = src1->nb[1] / ts_src1;
                 const int64_t s12 = src1->nb[2] / ts_src1;
                 const int64_t s13 = src1->nb[3] / ts_src1;
@@ -173,7 +149,6 @@ void ggml_cuda_mul_mat_q(
                                        ne10, s11, s12, s13, ne10_padded, ne11, ne12, ne13, stream);
                 CUDA_CHECK(cudaGetLastError());
 
-                // Store in hashmap cache
                 ctx.q8_cache.store(src1, layout, q8_data, nbytes_src1_q8_1,
                                    ne10_padded, ne11, ne12, ne13);
                 src1_q8_1_ptr = static_cast<const char*>(q8_data);
@@ -181,7 +156,7 @@ void ggml_cuda_mul_mat_q(
         } else
 #endif
         {
-            // Caching disabled or using native mxfp4 - use pool allocation (original behavior)
+            // Native mxfp4 or caching disabled - use pool allocation
             src1_q8_1_pool.alloc(ctx.pool(), nbytes_src1_q8_1);
             src1_q8_1_ptr = src1_q8_1_pool.get();
 
@@ -250,34 +225,22 @@ void ggml_cuda_mul_mat_q(
 
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
     // MoE caching: quantize full tensor once, gather rows for each expert call
-    // - 33% hit rate (gate→up share ffn_norm, down uses different tensor)
-    // - Buffer pooling eliminates cudaMalloc overhead
     if (!use_native_mxfp4) {
         const int layout = static_cast<int>(mmq_get_q8_1_ds_layout(src0->type));
 
-        // Hashmap cache lookup for MoE (uses same cache as regular path)
         const q8_cache_entry* moe_cached = ctx.q8_cache.lookup(
             src1, layout, ne10_padded, ne11, ne12, ne13);
 
         if (!moe_cached) {
-            if (q8_cache_debug) {
-                fprintf(stderr, "[Q8_CACHE] MOE MISS: src0=%s src1=%s (dims: %ld,%ld,%ld,%ld)\n",
-                        src0->name, src1->name,
-                        (long)ne10_padded, (long)ne11, (long)ne12, (long)ne13);
-                fflush(stderr);
-            }
-            // Cache MISS - quantize ALL rows and store in cache
             const size_t full_nbytes = ne13*ne12*ne11*ne10_padded * sizeof(block_q8_1)/QK8_1 +
                 get_mmq_x_max_host(cc)*sizeof(block_q8_1_mmq);
 
-            // Get buffer from pool (reuses existing or allocates new)
             void* full_q8 = ctx.q8_cache.get_buffer(full_nbytes);
 
             const int64_t s11 = src1->nb[1] / ts_src1;
             const int64_t s12 = src1->nb[2] / ts_src1;
             const int64_t s13 = src1->nb[3] / ts_src1;
 
-            // Quantize ALL rows (nullptr for ids = no row selection)
             quantize_mmq_q8_1_cuda(src1_d, nullptr, static_cast<char*>(full_q8), src0->type,
                                    ne10, s11, s12, s13, ne10_padded,
                                    ne11, ne12, ne13, stream);
@@ -286,23 +249,10 @@ void ggml_cuda_mul_mat_q(
             ctx.q8_cache.store(src1, layout, full_q8, full_nbytes,
                                ne10_padded, ne11, ne12, ne13);
 
-            // Get the entry we just stored for gather
             moe_cached = ctx.q8_cache.lookup(src1, layout, ne10_padded, ne11, ne12, ne13);
-        } else {
-            // Cache HIT - full tensor already quantized
-            if (q8_cache_debug) {
-                fprintf(stderr, "[Q8_CACHE] MOE HIT: src0=%s src1=%s\n",
-                        src0->name, src1->name);
-                fflush(stderr);
-            }
         }
 
-        // Gather the needed rows from the cached full Q8_1 tensor
-        // Parameters for interleaved layout gather:
-        // - block_size: sizeof(block_q8_1_mmq) = 4*QK8_1 + 4*sizeof(half2) = 144 bytes
-        // - n_blocks: ne10_padded / (4*QK8_1) = number of MMQ blocks per row
-        // - n_src_rows: ne11 = total rows in cached tensor
-        // - n_dst_rows: ne11_flat = rows to gather for this MoE call
+        // Gather selected rows from cached full Q8_1 tensor
         const int64_t block_size = sizeof(block_q8_1_mmq);
         const int64_t n_blocks = ne10_padded / (4*QK8_1);
 
@@ -312,8 +262,8 @@ void ggml_cuda_mul_mat_q(
             src1_q8_1.get(),
             block_size,
             n_blocks,
-            ne11,        // n_src_rows
-            ne11_flat,   // n_dst_rows
+            ne11,
+            ne11_flat,
             stream
         );
         CUDA_CHECK(cudaGetLastError());

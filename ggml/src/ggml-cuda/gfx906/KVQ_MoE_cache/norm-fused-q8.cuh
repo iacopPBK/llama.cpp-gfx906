@@ -1,12 +1,10 @@
 #pragma once
 
-// Fused RMS Norm + Q8_1 Quantization for GFX906 KV/MoE caching.
-// Eliminates separate quantization kernel by fusing into RMS norm epilogue.
+// Fused RMS Norm + Q8_1 Quantization for GFX906 KV/MoE caching
 
 #include "../../common.cuh"
 #include "../../mmq.cuh"
 
-// Execute fused RMS normalization + Q8_1 quantization
 void ggml_cuda_op_rms_norm_fused_q8_1(
     ggml_backend_cuda_context& ctx,
     const ggml_tensor* rms_norm,
