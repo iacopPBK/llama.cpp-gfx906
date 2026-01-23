@@ -130,6 +130,12 @@ static inline bool try_prequantized_mul_mat(ggml_backend_cuda_context* cuda_ctx,
         return false;
     }
 
+    // Verify the weight type supports MMQ before using prequantized path
+    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+    if (!ggml_cuda_should_use_mmq(node->src[0]->type, cc, node->ne[1], 1)) {
+        return false;
+    }
+
     auto it = cuda_ctx->fusion_prequant_map.find(node->src[1]);
     if (it == cuda_ctx->fusion_prequant_map.end()) {
         return false;
