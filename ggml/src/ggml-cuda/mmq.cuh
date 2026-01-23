@@ -3503,11 +3503,13 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         __syncthreads();
 
 // GFX906 PREFETCH: Issue AFTER barrier1, BEFORE vec_dot1
-// Maximum overlap: vec_dot1 + barrier2 + Y_tile2_load + barrier3 + vec_dot2 + barrier4 + X_tile_loads
-// Data used at Y_tile1_load in next iteration (~600+ instructions of overlap)
+// Warp 0: prefetch Y tile, Warp 1: prefetch X tile
+// Uses spare VGPRs to warm L2 cache for next iteration
 #if defined(GGML_USE_HIP) && defined(__gfx906__)
-        int prefetch_keep_alive = gfx906_prefetch_y_tile_v4<mmq_x, MMQ_TILE_Y_K, nwarps, warp_size>(
+        int prefetch_y = gfx906_prefetch_y_tile_v4<mmq_x, MMQ_TILE_Y_K, nwarps, warp_size>(
             y, ncols_y, kb0, kb0_stop, qk, blocks_per_iter);
+        int prefetch_x = gfx906_prefetch_x_tile<mmq_y>(
+            x, offset_x, kb0, kb0_stop, blocks_per_iter, stride_row_x);
 #endif
 
         vec_dot(tile_x, tile_y, sum, 0);
@@ -3528,7 +3530,8 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         vec_dot(tile_x, tile_y, sum, MMQ_TILE_NE_K);
 
 #if defined(GGML_USE_HIP) && defined(__gfx906__)
-        gfx906_prefetch_consume(prefetch_keep_alive);
+        gfx906_prefetch_consume(prefetch_y);
+        gfx906_prefetch_consume(prefetch_x);
 #endif
 
         __syncthreads();
