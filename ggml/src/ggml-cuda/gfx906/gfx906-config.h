@@ -4,7 +4,7 @@
 
 #ifdef GGML_USE_HIP
 
-#define GFX906_FATTN_SPLIT_K_ENABLED 0
+#define GFX906_FATTN_SPLIT_K_ENABLED 1
 
 #if GFX906_FATTN_SPLIT_K_ENABLED
     #define GFX906_FATTN_N_SPLIT_MAX 8
@@ -24,7 +24,9 @@
 #define GFX906_Q8_SCALE_HOISTING 1
 
 // Q8_1 activation caching for KV projections and MoE routing
-// Reduces quantize_mmq_q8_1 kernel launches by caching quantized activations
-#define GFX906_KVQ_MOE_CACHE_ENABLED 0
+#define GFX906_KVQ_MOE_CACHE_ENABLED 1
+
+// Optimized RoPE kernel using __sincosf and precomputed theta
+#define GFX906_ROPE_ENABLED 1
 
 #endif // GGML_USE_HIP
