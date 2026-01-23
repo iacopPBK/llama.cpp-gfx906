@@ -5,6 +5,7 @@
 #include "../../common.cuh"
 #include "../../mmq.cuh"
 
+// Fused RMS_NORM + MUL -> Q8 output
 void ggml_cuda_op_rms_norm_fused_q8_1(
     ggml_backend_cuda_context& ctx,
     const ggml_tensor* rms_norm,
