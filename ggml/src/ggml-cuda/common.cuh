@@ -33,7 +33,7 @@
 #if defined(GGML_USE_HIP)
 #include "gfx906/gfx906-config.h"
 #if GFX906_KVQ_MOE_CACHE_ENABLED
-#include "gfx906/KVQ_MoE_cache/q8-cache.cuh"
+#include "gfx906/quantize/q8-cache.cuh"
 #endif
 #endif
 

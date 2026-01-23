@@ -2,9 +2,9 @@
 
 // GFX906 custom FP16 GEMM kernel for medium batch sizes (9-2048)
 
-#include "gfx906-common.cuh"
-#include "gfx906-config.h"
-#include "gfx906-sgemm.cuh"
+#include "../gfx906-common.cuh"
+#include "../gfx906-config.h"
+#include "sgemm.cuh"
 
 #ifdef GGML_USE_HIP
 

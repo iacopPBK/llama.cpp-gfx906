@@ -3,8 +3,8 @@
 // MMQ vectorized loads: 2x int4 (128-bit) instead of 8x scalar loads
 // Q8_0 software pipelining: separate load/store phases for better MLP
 
-#include "gfx906-config.h"
-#include "gfx906-vecdotq.cuh"
+#include "../gfx906-config.h"
+#include "../quantize/vecdotq.cuh"
 
 #if defined(GGML_USE_HIP)
 

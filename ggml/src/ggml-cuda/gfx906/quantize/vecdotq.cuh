@@ -3,7 +3,7 @@
 // MXFP4 dequantization using v_perm_b32 for 8-entry table lookup
 // Unaligned memory loads via memcpy (compiler optimizes to flat_load)
 
-#include "gfx906-config.h"
+#include "../gfx906-config.h"
 
 #if defined(GGML_USE_HIP) && defined(__gfx906__)
 
@@ -18,6 +18,14 @@ static __device__ __forceinline__ int gfx906_get_int_b2_fast(const void * x, con
     int x32;
     memcpy(&x32, (const uint8_t*)x + 4*i32, 4);
     return x32;
+}
+
+// 64-bit vectorized load - emits global_load_dwordx2 when aligned
+// Used for double-throughput memory access in MMQ tile loading
+static __device__ __forceinline__ int2 gfx906_load_int2(const void * x, const int & i32) {
+    int2 x64;
+    memcpy(&x64, (const uint8_t*)x + 4*i32, 8);
+    return x64;
 }
 
 __constant__ uint8_t gfx906_mxfp4_magnitudes[8] = { 0, 1, 2, 3, 4, 6, 8, 12 };

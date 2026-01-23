@@ -4,7 +4,7 @@
 #include "rope.cuh"
 
 #ifdef GGML_USE_HIP
-#include "gfx906/gfx906-rope.cuh"
+#include "gfx906/attention/rope.cuh"
 #endif
 
 struct rope_corr_dims {

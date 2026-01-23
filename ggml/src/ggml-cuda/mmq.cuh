@@ -11,9 +11,9 @@ using namespace ggml_cuda_mma;
 
 // GFX906 MMQ optimizations (vectorized loads and prefetch)
 #ifdef GGML_USE_HIP
-    #include "gfx906/gfx906-mmq.cuh"
+    #include "gfx906/matmul/mmq.cuh"
     #include "gfx906/gfx906-config.h"
-    #include "gfx906/gfx906-mmq-prefetch.cuh"
+    #include "gfx906/matmul/mmq-prefetch.cuh"
 #endif
 
 #define MMQ_DP4A_MAX_BATCH_SIZE 64 // Max. batch size to use for dp4a MMQ kernels when FP16 tensor cores are available.

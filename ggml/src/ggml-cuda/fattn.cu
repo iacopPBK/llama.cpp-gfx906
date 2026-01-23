@@ -8,7 +8,7 @@
 
 // GFX906 Q8 Flash Attention kernel
 #ifdef GGML_USE_HIP
-    #include "gfx906/gfx906-fattn-q8.cuh"
+    #include "gfx906/attention/fattn-q8.cuh"
 #endif
 
 template <int DKQ, int DV, int ncols2>

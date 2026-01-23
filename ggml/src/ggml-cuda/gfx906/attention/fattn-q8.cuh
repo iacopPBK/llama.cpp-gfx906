@@ -1,12 +1,12 @@
 // Flash Attention with Q8_0 quantized KV cache for GFX906
 // Uses v_dot4_i32_i8 for INT8 dot products
 
-#include "../common.cuh"
-#include "../fattn-common.cuh"
-#include "../cpy-utils.cuh"
+#include "../../common.cuh"
+#include "../../fattn-common.cuh"
+#include "../../cpy-utils.cuh"
 
-#include "gfx906-config.h"
-#include "gfx906-common.cuh"
+#include "../gfx906-config.h"
+#include "../gfx906-common.cuh"
 
 #define GGML_CUDA_FATTN_TILE_CONFIG_CASE(DKQ_, DV_, ncols_, nthreads, occupancy, nbatch_fa, nbatch_K) \
     if (DKQ == (DKQ_) && DV == (DV_) && ncols == (ncols_)) {                                          \

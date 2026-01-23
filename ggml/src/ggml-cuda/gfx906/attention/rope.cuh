@@ -2,7 +2,7 @@
 
 // GFX906 RoPE kernel using __sincosf() for combined sin/cos computation
 
-#include "gfx906-config.h"
+#include "../gfx906-config.h"
 
 #if defined(GGML_USE_HIP) && defined(GFX906_ROPE_ENABLED)
 

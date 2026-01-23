@@ -2,7 +2,7 @@
 
 // Graph fusion for Q8 KV/MoE caching - detects RMS_NORM -> MUL -> MUL_MAT patterns
 
-#include "q8-cache.cuh"
+#include "../quantize/q8-cache.cuh"
 #include "norm-fused-q8.cuh"
 #include "mmq-prequantized.cuh"
 #include "../../common.cuh"

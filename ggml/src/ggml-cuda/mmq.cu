@@ -4,7 +4,7 @@
 #include "mmid.cuh"
 
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
-#include "gfx906/KVQ_MoE_cache/gather-q8.cuh"
+#include "gfx906/fused/gather-q8.cuh"
 #endif
 
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {

@@ -60,13 +60,13 @@
 #include "ggml-cuda/tri.cuh"
 
 #ifdef GGML_USE_HIP
-#include "ggml-cuda/gfx906/gfx906-mmf.cuh"
+#include "ggml-cuda/gfx906/matmul/mmf.cuh"
 #endif
 #include "ggml-cuda/cumsum.cuh"
 #include "ggml-cuda/fill.cuh"
 
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
-#include "ggml-cuda/gfx906/KVQ_MoE_cache/graph-fusion.cuh"
+#include "ggml-cuda/gfx906/fused/graph-fusion.cuh"
 #endif
 
 #include "ggml.h"

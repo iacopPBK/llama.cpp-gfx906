@@ -1,7 +1,7 @@
 // Q8 Flash Attention dispatch: head sizes 64, 96, 128, 256, 576
 
-#include "../common.cuh"
-#include "gfx906-fattn-q8.cuh"
+#include "../../common.cuh"
+#include "fattn-q8.cuh"
 
 void ggml_cuda_flash_attn_ext_tile_q8(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * K = dst->src[1];

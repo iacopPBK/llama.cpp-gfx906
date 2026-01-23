@@ -4,7 +4,7 @@
 
 #ifdef GGML_USE_HIP
 #include "../gfx906-common.cuh"
-#include "../gfx906-quantize-epilogue.cuh"
+#include "../quantize/epilogue.cuh"
 #endif
 
 template <int block_size, mmq_q8_1_ds_layout ds_layout, bool do_multiply = false>

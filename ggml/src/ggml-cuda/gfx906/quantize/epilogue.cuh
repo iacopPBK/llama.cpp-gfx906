@@ -3,9 +3,9 @@
 // GFX906 Q8_1 quantization epilogue functions using DPP reductions.
 // Allows producer kernels to quantize FP32 values directly to Q8_1 format.
 
-#include "gfx906-config.h"
-#include "gfx906-common.cuh"
-#include "../mmq.cuh"
+#include "../gfx906-config.h"
+#include "../gfx906-common.cuh"
+#include "../../mmq.cuh"
 
 #ifdef GGML_USE_HIP
 

@@ -6,7 +6,7 @@
 
 // GFX906 optimizations
 #if defined(GGML_USE_HIP) && defined(__gfx906__)
-    #include "gfx906/gfx906-vecdotq.cuh"
+    #include "gfx906/quantize/vecdotq.cuh"
 #endif
 
 static __device__ __forceinline__ int get_int_b1(const void * x, const int & i32) {

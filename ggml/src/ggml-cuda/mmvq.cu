@@ -5,9 +5,9 @@
 
 // GFX906-specific warp-cooperative MMVQ kernels (compile with -DGGML_HIP_GFX906)
 #if defined(GGML_HIP_GFX906)
-#include "gfx906/gfx906-mmvq-q4_0.cuh"
-#include "gfx906/gfx906-mmvq-q4_1.cuh"
-#include "gfx906/gfx906-mmvq-q8_0.cuh"
+#include "gfx906/matmul/mmvq-q4_0.cuh"
+#include "gfx906/matmul/mmvq-q4_1.cuh"
+#include "gfx906/matmul/mmvq-q8_0.cuh"
 #endif
 
 #include <cstdint>
