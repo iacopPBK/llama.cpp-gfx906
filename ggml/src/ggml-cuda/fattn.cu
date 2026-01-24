@@ -423,7 +423,8 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         const bool q8_head_size_supported = (K->ne[0] % 32 == 0) &&
                                             (K->ne[0] != 40) &&
                                             (K->ne[0] != 80) &&
-                                            (K->ne[0] != 112);
+                                            (K->ne[0] != 112) &&
+                                            (K->ne[0] != 576);
 
         if (q8_head_size_supported) {
             const char * env_use_dot4 = getenv("GGML_HIP_FATTN_USE_TILE_DOT4");
