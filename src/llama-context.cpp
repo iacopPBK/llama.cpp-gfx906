@@ -793,7 +793,8 @@ float * llama_context::get_embeddings_ith(int32_t i) {
             throw std::runtime_error(format("corrupt output buffer (j=%" PRId64 ", n_outputs=%d)", j, n_outputs));
         }
 
-        return embd + j*model.hparams.n_embd;
+        const uint32_t n_embd_out = model.hparams.n_embd_out();
+        return embd + j*n_embd_out;
     } catch (const std::exception & err) {
         LLAMA_LOG_ERROR("%s: invalid embeddings id %d, reason: %s\n", __func__, i, err.what());
 #ifndef NDEBUG
@@ -1278,6 +1279,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
                 {
                     // extract token embeddings
                     GGML_ASSERT(embd != nullptr);
+                    const uint32_t n_embd_out = hparams.n_embd_out();
 
                     GGML_ASSERT(n_tokens*n_embd <= (int64_t) embd_size);
                     ggml_backend_tensor_get_async(backend_embd, t_embd, embd, 0, n_tokens*n_embd*sizeof(float));
@@ -1686,7 +1688,8 @@ int llama_context::decode(const llama_batch & batch_inp) {
                     {
                         // extract token embeddings
                         GGML_ASSERT(embd != nullptr);
-                        float * embd_out = embd + n_outputs_prev*n_embd;
+                        const uint32_t n_embd_out = hparams.n_embd_out();
+                        float * embd_out = embd + n_outputs_prev*n_embd_out;
 
                         if (n_outputs) {
                             GGML_ASSERT( n_outputs_prev + n_outputs <= n_outputs_all);
@@ -1816,9 +1819,9 @@ uint32_t llama_context::output_reserve(int32_t n_outputs, const llama_batch & ba
 
     const int64_t n_outputs_max = std::max<int64_t>(n_outputs, n_seq_max());
 
-    const auto n_batch = cparams.n_batch;
-    const auto n_vocab = vocab.n_tokens();
-    const auto n_embd  = hparams.n_embd;
+    const auto n_batch    = cparams.n_batch;
+    const auto n_vocab    = vocab.n_tokens();
+    const auto n_embd_out = hparams.n_embd_out();
 
     bool has_logits = true;
     bool has_embd   = cparams.embeddings;
@@ -1859,7 +1862,7 @@ uint32_t llama_context::output_reserve(int32_t n_outputs, const llama_batch & ba
 
     // Allocate CPU logits buffer only if needed by sequences in this batch
     logits_size = (has_logits && cpu_logits) ? n_vocab*n_outputs_max : 0;
-    embd_size   = has_embd ? n_embd*n_outputs_max : 0;
+    embd_size   = has_embd ? n_embd_out*n_outputs_max : 0;
 
     // TODO: avoid this branching by working with the worst-case
     if (!has_sampling) {
@@ -2556,6 +2559,7 @@ size_t llama_context::state_write_data(llama_io_write_i & io) {
         }
     }
 
+    // [TAG_CONTEXT_STATE_LOGITS]
     // write logits
     {
         LLAMA_LOG_DEBUG("%s: - writing logits\n", __func__);

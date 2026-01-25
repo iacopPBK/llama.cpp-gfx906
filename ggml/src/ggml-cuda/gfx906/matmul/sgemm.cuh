@@ -214,7 +214,7 @@ static bool gfx906_sgemm_custom_dispatch(
         return false;
     }
 
-    if (M > 32 || N > 2048 || K > 8192) {
+    if (M > 128 || N > 2048 || K > 8192) {
         return false;
     }
 

@@ -783,8 +783,12 @@ ggml_metal_device_t ggml_metal_device_init(void) {
             dev->props.supports_gpu_family_apple7 = [dev->mtl_device supportsFamily:MTLGPUFamilyApple7];
 
             dev->props.max_buffer_size            = dev->mtl_device.maxBufferLength;
-            dev->props.max_working_set_size       = dev->mtl_device.recommendedMaxWorkingSetSize;
             dev->props.max_theadgroup_memory_size = dev->mtl_device.maxThreadgroupMemoryLength;
+            if (@available(macOS 10.12, iOS 16.0, *)) {
+                dev->props.max_working_set_size   = dev->mtl_device.recommendedMaxWorkingSetSize;
+            } else {
+                dev->props.max_working_set_size   = dev->mtl_device.maxBufferLength;
+            }
 
             strncpy(dev->props.name, [[dev->mtl_device name] UTF8String], sizeof(dev->props.name) - 1);
 
