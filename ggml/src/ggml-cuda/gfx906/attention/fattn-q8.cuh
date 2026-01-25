@@ -200,6 +200,8 @@ static __device__ __forceinline__ void flash_attn_tile_q8_quantize_Q_to_shared(
         half * __restrict__ Q_scales,
         const int col_Q_0,
         const int ne01,
+        const int head0,
+        const int ne02,
         const int32_t nb01,
         const int32_t nb02,
         const float scale) {
@@ -217,7 +219,9 @@ static __device__ __forceinline__ void flash_attn_tile_q8_quantize_Q_to_shared(
         const int j = jc / ncols2;
         const int c = jc % ncols2;
 
-        if (ncols != 1 && col_Q_0 + j >= ne01) {
+        // Bounds check for non-power-of-2 GQA ratios
+        // ncols1 = ncols / ncols2
+        if ((ncols > ncols2 && col_Q_0 + j >= ne01) || (ncols2 > 1 && head0 + c >= ne02)) {
             continue;
         }
 
@@ -631,8 +635,11 @@ static __global__ void flash_attn_tile_q8(
 
     const int col_Q_0 = blockIdx.x * ncols1;
 
-    const int sequence = blockIdx.z / (ne02/ncols2);
-    const int head0 = blockIdx.z*ncols2 - sequence*ne02;
+    // Use ceiling division to handle non-power-of-2 GQA ratios
+    const int ntiles_z = (ne02 + ncols2 - 1) / ncols2;
+    const int sequence = blockIdx.z / ntiles_z;
+    const int zt = blockIdx.z - sequence * ntiles_z;
+    const int head0 = zt * ncols2;
     const int gqa_ratio = ne02 / ne12;
     const float * Q_f  = (const float *) (Q + nb03*sequence + nb02* head0              + nb01*col_Q_0);
     const block_q8_0 * K_q8 = (const block_q8_0 *) (K + nb13*sequence + nb12*(head0 / gqa_ratio));
@@ -679,7 +686,7 @@ static __global__ void flash_attn_tile_q8(
     float KQ_sum[cpw] = {0.0f};
 
     flash_attn_tile_q8_quantize_Q_to_shared<nwarps*warp_size, ncols, ncols2, DKQ>(
-        Q_f, Q_values, Q_scales, col_Q_0, int(ne01.z), nb01, nb02, scale);
+        Q_f, Q_values, Q_scales, col_Q_0, int(ne01.z), head0, ne02, nb01, nb02, scale);
 
     const int k_VKQ_max = KV_max ? KV_max[sequence*gridDim.x + blockIdx.x] : ne11;
     if (ncols2 == 1) {
@@ -779,8 +786,9 @@ static __global__ void flash_attn_tile_q8(
         const int j = jc / ncols2;
         const int c = jc % ncols2;
 
-        if (ncols1 > 1 && col_Q_0 + j >= int(ne01.z)) {
-            return;
+        // Bounds check for non-power-of-2 GQA ratios
+        if ((ncols1 > 1 && col_Q_0 + j >= int(ne01.z)) || (ncols2 > 1 && head0 + c >= ne02)) {
+            continue;
         }
 
         const float scale = gridDim.y == 1 ? 1.0f/KQ_sum[jc0] : 1.0f;
@@ -919,24 +927,26 @@ static void launch_fattn_tile_q8_switch_ncols2(ggml_backend_cuda_context & ctx, 
     const bool use_gqa_opt = mask && max_bias == 0.0f && Q->ne[1] <= gqa_limit && K->ne[1] % FATTN_KQ_STRIDE == 0;
 
     if constexpr (DV == 512) {
-        if (use_gqa_opt && gqa_ratio % 16 == 0) {
+        // Changed from gqa_ratio % 16 == 0 to gqa_ratio > 8 to handle non-power-of-2 GQA ratios
+        if (use_gqa_opt && gqa_ratio > 8) {
             launch_fattn_tile_q8_switch_ncols1<DKQ, DV, 16, use_logit_softcap>(ctx, dst);
             return;
         }
     }
 
     if constexpr (DV <= 256) {
-        if (use_gqa_opt && gqa_ratio % 8 == 0) {
+        // Changed from gqa_ratio % N == 0 to gqa_ratio > N to handle non-power-of-2 GQA ratios
+        if (use_gqa_opt && gqa_ratio > 4) {
             launch_fattn_tile_q8_switch_ncols1<DKQ, DV, 8, use_logit_softcap>(ctx, dst);
             return;
         }
 
-        if (use_gqa_opt && gqa_ratio % 4 == 0) {
+        if (use_gqa_opt && gqa_ratio > 2) {
             launch_fattn_tile_q8_switch_ncols1<DKQ, DV, 4, use_logit_softcap>(ctx, dst);
             return;
         }
 
-        if (use_gqa_opt && gqa_ratio % 2 == 0) {
+        if (use_gqa_opt && gqa_ratio > 1) {
             launch_fattn_tile_q8_switch_ncols1<DKQ, DV, 2, use_logit_softcap>(ctx, dst);
             return;
         }
