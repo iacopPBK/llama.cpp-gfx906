@@ -291,12 +291,6 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter_KQ(
     for (int jc0 = 0; jc0 < cpw; ++jc0) {
         const int jc = jc0 + (threadIdx.y / np)*cpw;
 
-        half q_scales_hoisted[blocks_per_K_row];
-        #pragma unroll
-        for (int block_id = 0; block_id < blocks_per_K_row; block_id++) {
-            q_scales_hoisted[block_id] = Q_scales[((k_KQ_0/32) + block_id) * ncols + jc];
-        }
-
         #pragma unroll 4
         for (int i_KQ_0 = 0; i_KQ_0 < nbatch_fa; i_KQ_0 += np*warp_size) {
             const int i_KQ = i_KQ_0 + (threadIdx.y % np)*warp_size + threadIdx.x;
@@ -304,37 +298,32 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter_KQ(
 
             const int8_t* K_row_base = K_values + i_KQ * K_row_stride;
 
-            // Hoist K_scales outside block_id loop - reduces LDS accesses
-            half k_scales_hoisted[blocks_per_K_row];
-            #pragma unroll
-            for (int block_id = 0; block_id < blocks_per_K_row; block_id++) {
-                k_scales_hoisted[block_id] = K_scales[block_id * nbatch_fa + i_KQ];
-            }
-
-            // Increased unroll factor (2->4) reduces loop overhead for common head dims
             #pragma unroll 4
             for (int block_id = 0; block_id < blocks_per_K_row; block_id++) {
                 const int4* K_ptr4 = (const int4*)(K_row_base + block_id * 32);
                 const int4* Q_ptr4 = (const int4*)&Q_values[jc * DKQ + k_KQ_0 + block_id * 32];
 
                 int acc_int = 0;
-                const int4 K_lo = K_ptr4[0];
-                const int4 Q_lo = Q_ptr4[0];
+                {
+                    const int4 K_lo = K_ptr4[0];
+                    const int4 Q_lo = Q_ptr4[0];
+                    acc_int = ggml_cuda_dp4a(K_lo.x, Q_lo.x, acc_int);
+                    acc_int = ggml_cuda_dp4a(K_lo.y, Q_lo.y, acc_int);
+                    acc_int = ggml_cuda_dp4a(K_lo.z, Q_lo.z, acc_int);
+                    acc_int = ggml_cuda_dp4a(K_lo.w, Q_lo.w, acc_int);
+                }
+                {
+                    const int4 K_hi = K_ptr4[1];
+                    const int4 Q_hi = Q_ptr4[1];
+                    acc_int = ggml_cuda_dp4a(K_hi.x, Q_hi.x, acc_int);
+                    acc_int = ggml_cuda_dp4a(K_hi.y, Q_hi.y, acc_int);
+                    acc_int = ggml_cuda_dp4a(K_hi.z, Q_hi.z, acc_int);
+                    acc_int = ggml_cuda_dp4a(K_hi.w, Q_hi.w, acc_int);
+                }
 
-                acc_int = ggml_cuda_dp4a(K_lo.x, Q_lo.x, acc_int);
-                const int4 K_hi = K_ptr4[1];
-                acc_int = ggml_cuda_dp4a(K_lo.y, Q_lo.y, acc_int);
-                const int4 Q_hi = Q_ptr4[1];
-                acc_int = ggml_cuda_dp4a(K_lo.z, Q_lo.z, acc_int);
-                // Use hoisted K scale instead of LDS access
-                const half combined_scale_h = __hmul(k_scales_hoisted[block_id], q_scales_hoisted[block_id]);
-                acc_int = ggml_cuda_dp4a(K_lo.w, Q_lo.w, acc_int);
-
-                acc_int = ggml_cuda_dp4a(K_hi.x, Q_hi.x, acc_int);
-                acc_int = ggml_cuda_dp4a(K_hi.y, Q_hi.y, acc_int);
-                acc_int = ggml_cuda_dp4a(K_hi.z, Q_hi.z, acc_int);
-                acc_int = ggml_cuda_dp4a(K_hi.w, Q_hi.w, acc_int);
-
+                const half combined_scale_h = __hmul(
+                    K_scales[block_id * nbatch_fa + i_KQ],
+                    Q_scales[((k_KQ_0/32) + block_id) * ncols + jc]);
                 KQ_acc[idx] += __half2float(combined_scale_h) * (float)acc_int;
             }
         }
@@ -386,7 +375,27 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
     }
 
     constexpr int num_i_KQ_iters = nbatch_fa/(np*warp_size);
-    float KQ_acc[num_i_KQ_iters * cpw] = {0.0f};
+
+    // Overlay KQ_acc onto V_tmp shared memory to reduce VGPR pressure.
+    // KQ_acc and V_tmp are never used simultaneously (KQ_acc during dot products, V_tmp during V loading).
+    constexpr int kv_tmp_elems = nbatch_fa * (nbatch_K/2 + cpy_ne) + DVp - DV;
+    constexpr size_t kv_tmp_bytes = kv_tmp_elems * sizeof(half2);
+    constexpr size_t kq_acc_bytes = nwarps * warp_size * num_i_KQ_iters * cpw * sizeof(float);
+    constexpr bool use_kq_acc_overlay = (kq_acc_bytes <= kv_tmp_bytes);
+
+    float  KQ_acc_local[use_kq_acc_overlay ? 1 : num_i_KQ_iters * cpw];
+    float* KQ_acc;
+
+    if constexpr (use_kq_acc_overlay) {
+        const int tid = threadIdx.y * warp_size + threadIdx.x;
+        KQ_acc = reinterpret_cast<float*>(V_tmp) + tid * (num_i_KQ_iters * cpw);
+    } else {
+        KQ_acc = KQ_acc_local;
+    }
+    #pragma unroll
+    for (int i = 0; i < num_i_KQ_iters * cpw; ++i) {
+        KQ_acc[i] = 0.0f;
+    }
 
     constexpr int nbatch_K_last = DKQ % nbatch_K;
     constexpr int num_K_tiles = (DKQ - nbatch_K_last) / nbatch_K;
@@ -539,6 +548,12 @@ static __device__ __forceinline__ void flash_attn_tile_q8_q8_iter(
     constexpr int nbatch_V = (DV % nbatch_K == 0 ? nbatch_K : nbatch_K*2/3) * nbatch_fa / DV;
     static_assert(nbatch_fa % nbatch_V == 0, "bad nbatch_V");
     static_assert(nbatch_V % np == 0, "bad nbatch_V");
+
+    if constexpr (use_kq_acc_overlay) {
+        // KQ_acc was overlaid onto V_tmp; ensure all threads finished reading before V_tmp reuse.
+        __syncthreads();
+    }
+
 #pragma unroll
     for (int k0 = 0; k0 < nbatch_fa; k0 += nbatch_V) {
         flash_attn_tile_q8_q8_load_tile<warp_size, nwarps, nbatch_V, DV, 0, oob_check>
