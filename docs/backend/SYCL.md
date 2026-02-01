@@ -35,9 +35,9 @@ The following releases are verified and recommended:
 
 |Commit ID|Tag|Release|Verified  Platform| Update date|
 |-|-|-|-|-|
-|24e86cae7219b0f3ede1d5abdf5bf3ad515cccb8|b5377 |[llama-b5377-bin-win-sycl-x64.zip](https://github.com/ggml-org/llama.cpp/releases/download/b5377/llama-b5377-bin-win-sycl-x64.zip) |ArcB580/Linux/oneAPI 2025.1<br>LNL Arc GPU/Windows 11/oneAPI 2025.1.1|2025-05-15|
-|3bcd40b3c593d14261fb2abfabad3c0fb5b9e318|b4040 |[llama-b4040-bin-win-sycl-x64.zip](https://github.com/ggml-org/llama.cpp/releases/download/b4040/llama-b4040-bin-win-sycl-x64.zip) |Arc770/Linux/oneAPI 2024.1<br>MTL Arc GPU/Windows 11/oneAPI 2024.1| 2024-11-19|
-|fb76ec31a9914b7761c1727303ab30380fd4f05c|b3038 |[llama-b3038-bin-win-sycl-x64.zip](https://github.com/ggml-org/llama.cpp/releases/download/b3038/llama-b3038-bin-win-sycl-x64.zip) |Arc770/Linux/oneAPI 2024.1<br>MTL Arc GPU/Windows 11/oneAPI 2024.1||
+|24e86cae7219b0f3ede1d5abdf5bf3ad515cccb8|b5377 |[llama-b5377-bin-win-sycl-x64.zip](https://github.com/ggml-org/llama.cpp/releases/download/b5377/llama-b5377-bin-win-sycl-x64.zip) |Arc B580/Linux/oneAPI 2025.1<br>LNL Arc GPU/Windows 11/oneAPI 2025.1.1|2025-05-15|
+|3bcd40b3c593d14261fb2abfabad3c0fb5b9e318|b4040 |[llama-b4040-bin-win-sycl-x64.zip](https://github.com/ggml-org/llama.cpp/releases/download/b4040/llama-b4040-bin-win-sycl-x64.zip) |Arc A770/Linux/oneAPI 2024.1<br>MTL Arc GPU/Windows 11/oneAPI 2024.1| 2024-11-19|
+|fb76ec31a9914b7761c1727303ab30380fd4f05c|b3038 |[llama-b3038-bin-win-sycl-x64.zip](https://github.com/ggml-org/llama.cpp/releases/download/b3038/llama-b3038-bin-win-sycl-x64.zip) |Arc A770/Linux/oneAPI 2024.1<br>MTL Arc GPU/Windows 11/oneAPI 2024.1||
 
 
 ## News
@@ -51,7 +51,7 @@ The following releases are verified and recommended:
     |-|-|-|-|
     |PVC 1550|39|73|+87%|
     |Flex 170|39|50|+28%|
-    |Arc770|42|55|+30%|
+    |Arc A770|42|55|+30%|
     |MTL|13|16|+23%|
     |ARL-H|14|17|+21%|
 
@@ -62,7 +62,7 @@ The following releases are verified and recommended:
   - Use oneDNN as the default GEMM library, improve the compatibility for new Intel GPUs.
 
 - 2024.5
-  - Performance is increased: 34 -> 37 tokens/s of llama-2-7b.Q4_0 on Arc770.
+  - Performance is increased: 34 -> 37 tokens/s of llama-2-7b.Q4_0 on Arc A770.
   - Arch Linux is verified successfully.
 
 - 2024.4
@@ -111,14 +111,15 @@ On older Intel GPUs, you may try [OpenCL](/docs/backend/OPENCL.md) although the 
 |-------------------------------|---------|---------------------------------------|
 | Intel Data Center Max Series  | Support | Max 1550, 1100                        |
 | Intel Data Center Flex Series | Support | Flex 170                              |
-| Intel Arc Series              | Support | Arc 770, 730M, Arc A750, B580         |
+| Intel Arc A-Series              | Support | Arc A770, Arc A730M, Arc A750         |
+| Intel Arc B-Series              | Support | Arc B580         |
 | Intel built-in Arc GPU        | Support | built-in Arc GPU in Meteor Lake, Arrow Lake, Lunar Lake |
 | Intel iGPU                    | Support | iGPU in 13700k, 13400, i5-1250P, i7-1260P, i7-1165G7  |
 
 *Notes:*
 
 - **Memory**
-  - The device memory is a limitation when running a large model. The loaded model size, *`llm_load_tensors: buffer_size`*, is displayed in the log when running `./bin/llama-cli`.
+  - The device memory is a limitation when running a large model. The loaded model size, *`llm_load_tensors: buffer_size`*, is displayed in the log when running `./bin/llama-completion`.
   - Please make sure the GPU shared memory from the host is large enough to account for the model's size. For e.g. the *llama-2-7b.Q4_0* requires at least 8.0GB for integrated GPU and 4.0GB for discrete GPU.
 
 - **Execution Unit (EU)**
@@ -422,16 +423,12 @@ Choose one of following methods to run.
 - Use device 0:
 
 ```sh
-./examples/sycl/run-llama2.sh 0
-# OR
-./examples/sycl/run-llama3.sh 0
+./examples/sycl/test.sh -mg 0
 ```
 - Use multiple devices:
 
 ```sh
-./examples/sycl/run-llama2.sh
-# OR
-./examples/sycl/run-llama3.sh
+./examples/sycl/test.sh
 ```
 
 2. Command line
@@ -454,13 +451,13 @@ Examples:
 - Use device 0:
 
 ```sh
-ZES_ENABLE_SYSMAN=1 ./build/bin/llama-cli -no-cnv -m models/llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:" -n 400 -e -ngl 99 -sm none -mg 0
+ZES_ENABLE_SYSMAN=1 ./build/bin/llama-completion -no-cnv -m models/llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:" -n 400 -e -ngl 99 -sm none -mg 0 --mmap
 ```
 
 - Use multiple devices:
 
 ```sh
-ZES_ENABLE_SYSMAN=1 ./build/bin/llama-cli -no-cnv -m models/llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:" -n 400 -e -ngl 99 -sm layer
+ZES_ENABLE_SYSMAN=1 ./build/bin/llama-completion -no-cnv -m models/llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:" -n 400 -e -ngl 99 -sm layer --mmap
 ```
 
 *Notes:*
@@ -576,13 +573,13 @@ Or, use CMake presets to build:
 
 ```sh
 cmake --preset x64-windows-sycl-release
-cmake --build build-x64-windows-sycl-release -j --target llama-cli
+cmake --build build-x64-windows-sycl-release -j --target llama-completion
 
 cmake -DGGML_SYCL_F16=ON --preset x64-windows-sycl-release
-cmake --build build-x64-windows-sycl-release -j --target llama-cli
+cmake --build build-x64-windows-sycl-release -j --target llama-completion
 
 cmake --preset x64-windows-sycl-debug
-cmake --build build-x64-windows-sycl-debug -j --target llama-cli
+cmake --build build-x64-windows-sycl-debug -j --target llama-completion
 ```
 
 #### 3. Visual Studio
@@ -607,7 +604,7 @@ You can use Visual Studio to open the `llama.cpp` folder directly as a CMake pro
 - For a minimal experimental setup, you can build only the inference executable using:
 
     ```Powershell
-    cmake --build build --config Release -j --target llama-cli
+    cmake --build build --config Release -j --target llama-completion
     ```
 
 ##### - Generating a Visual Studio Solution
@@ -713,13 +710,7 @@ Choose one of following methods to run.
 1. Script
 
 ```
-examples\sycl\win-run-llama-2.bat
-```
-
-or
-
-```
-examples\sycl\win-run-llama-3.bat
+examples\sycl\win-test.bat
 ```
 
 2. Command line
@@ -743,13 +734,13 @@ Examples:
 - Use device 0:
 
 ```
-build\bin\llama-cli.exe -no-cnv -m models\llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:\nStep 1:" -n 400 -e -ngl 99 -sm none -mg 0
+build\bin\llama-completion.exe -no-cnv -m models\llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:\nStep 1:" -n 400 -e -ngl 99 -sm none -mg 0 --mmap
 ```
 
 - Use multiple devices:
 
 ```
-build\bin\llama-cli.exe -no-cnv -m models\llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:\nStep 1:" -n 400 -e -ngl 99 -sm layer
+build\bin\llama-completion.exe -no-cnv -m models\llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:\nStep 1:" -n 400 -e -ngl 99 -sm layer --mmap
 ```
 
 
