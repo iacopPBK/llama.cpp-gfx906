@@ -9,6 +9,7 @@
 // GFX906 Q8 Flash Attention kernel
 #ifdef GGML_USE_HIP
     #include "gfx906/attention/fattn-q8.cuh"
+    #include "gfx906/attention/fattn-helpers.cuh"
 #endif
 
 template <int DKQ, int DV, int ncols2>
@@ -415,21 +416,6 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         return BEST_FATTN_KERNEL_MMA_F16;
     }
 
-    if (volta_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
-        int gqa_ratio_eff = 1;
-        const int ncols2_max = Q->ne[0] == 576 ? 16 : 8;
-        while (gqa_ratio % (2*gqa_ratio_eff) == 0 && gqa_ratio_eff < ncols2_max) {
-            gqa_ratio_eff *= 2;
-        }
-        if (can_use_vector_kernel && Q->ne[1] * gqa_ratio_eff <= 2) {
-            return BEST_FATTN_KERNEL_VEC;
-        }
-        if (Q->ne[1] * gqa_ratio_eff <= 16) {
-            return BEST_FATTN_KERNEL_TILE;
-        }
-        return BEST_FATTN_KERNEL_MMA_F16;
-    }
-
     // Use the WMMA kernel if possible:
     if (ggml_cuda_should_use_wmma_fattn(cc) && K->ne[1] % FATTN_KQ_STRIDE == 0 && Q->ne[0] != 40 && Q->ne[0] != 72 && Q->ne[0] != 576) {
         if (can_use_vector_kernel && Q->ne[1] <= 2) {
@@ -481,17 +467,10 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 #endif
     }
 
-#ifdef GGML_USE_HIP
-    if (K->type == GGML_TYPE_Q8_0 || V->type == GGML_TYPE_Q8_0) {
-        const bool q8_head_size_supported = (K->ne[0] % 32 == 0) &&
-                                            (K->ne[0] != 40) &&
-                                            (K->ne[0] != 80) &&
-                                            (K->ne[0] != 112) &&
-                                            (K->ne[0] != 576);
-
-        if (q8_head_size_supported) {
-            return BEST_FATTN_KERNEL_TILE_Q8;
-        }
+#if defined(GGML_USE_HIP)
+    // Use Q8 Flash Attention on AMD when K/V are Q8_0 quantized
+    if (gfx906_fattn_can_use_q8(K, V)) {
+        return BEST_FATTN_KERNEL_TILE_Q8;
     }
 #endif
 

@@ -168,6 +168,7 @@ rm -rf build && mkdir -p build && cd build
 #
 # ============================================================================
 
+{
 cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER=$ROCM_PATH/llvm/bin/clang \
@@ -199,3 +200,4 @@ make -j$(nproc)
 
 echo ""
 echo "Build complete: ./build/bin/llama-cli, llama-server, llama-bench"
+} 2>&1 | tee ../compilation_log.txt

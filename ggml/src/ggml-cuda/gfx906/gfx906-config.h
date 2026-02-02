@@ -15,4 +15,16 @@
 #define GFX906_KVQ_MOE_CACHE_ENABLED 1
 #define GFX906_ROPE_ENABLED 1
 
+// ============================================================================
+// Universal Shuffle Primitives
+// ============================================================================
+
+// Include DPP functions for AMD
+#include "gfx906-warp.cuh"
+
+// Universal shuffle macro - uses DPP on AMD, __shfl_xor_sync on NVIDIA
+// Note: This is only defined for HIP builds. For CUDA builds, the caller
+// should use __shfl_xor_sync directly.
+#define GGML_CUDA_SHFL_XOR(val, offset, width) gfx906_shfl_xor_sync<width>(val, offset)
+
 #endif // GGML_USE_HIP

@@ -2358,9 +2358,9 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_FIT"));
     add_opt(common_arg(
         { "-fitt", "--fit-target" }, "MiB",
-        string_format("target margin per device for --fit option, default: %zu", params.fit_params_target/(1024*1024)),
+        string_format("target margin per device for --fit option, default: %zu", params.fit_params_target[0]/(1024*1024)),
         [](common_params & params, int value) {
-            params.fit_params_target = value * size_t(1024*1024);
+            std::fill(params.fit_params_target.begin(), params.fit_params_target.end(), value * size_t(1024*1024));
         }
     ).set_env("LLAMA_ARG_FIT_TARGET"));
     add_opt(common_arg(

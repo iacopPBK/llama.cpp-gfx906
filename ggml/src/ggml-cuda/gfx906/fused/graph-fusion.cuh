@@ -4,6 +4,7 @@
 // Fusion decisions are cached per-graph to avoid repeated O(n²) scans
 
 #include "../quantize/q8-cache.cuh"
+#include "../gfx906-context.cuh"
 #include "norm-fused-q8.cuh"
 #include "mmq-prequantized.cuh"
 #include "../../common.cuh"
@@ -165,7 +166,7 @@ static inline bool try_rms_mul_mmq_fusion(
     auto pool_alloc = std::make_unique<ggml_cuda_pool_alloc<char>>();
     pool_alloc->alloc(cuda_ctx->pool(), q8_buffer_size);
     char* buffer_ptr = pool_alloc->get();
-    cuda_ctx->fusion_q8_buffers.push_back(std::move(pool_alloc));
+    GFX906_Q8_BUFFERS(*cuda_ctx).push_back(std::move(pool_alloc));
 
     // Store dimensions for MMQ consumers
     prequantized_q8_info info;
@@ -181,8 +182,8 @@ static inline bool try_rms_mul_mmq_fusion(
                                       mul_weights, decision.mul_weight_src);
 
     // Store in map for MUL_MAT consumers
-    cuda_ctx->fusion_prequant_map[decision.mul_node] = info;
-    cuda_ctx->fusion_handled_mul_nodes.insert(decision.mul_node);
+    GFX906_PREQUANT_MAP(*cuda_ctx)[decision.mul_node] = info;
+    GFX906_HANDLED_MUL_NODES(*cuda_ctx).insert(decision.mul_node);
 
     return true;
 }
@@ -192,7 +193,7 @@ static inline bool is_mul_handled_by_fusion(ggml_backend_cuda_context* cuda_ctx,
     if (node->op != GGML_OP_MUL) {
         return false;
     }
-    return cuda_ctx->fusion_handled_mul_nodes.count(node) > 0;
+    return GFX906_HANDLED_MUL_NODES(*cuda_ctx).count(node) > 0;
 }
 
 // Use prequantized data for MUL_MAT if available
@@ -206,8 +207,8 @@ static inline bool try_prequantized_mul_mat(ggml_backend_cuda_context* cuda_ctx,
         return false;
     }
 
-    auto it = cuda_ctx->fusion_prequant_map.find(node->src[1]);
-    if (it == cuda_ctx->fusion_prequant_map.end()) {
+    auto it = GFX906_PREQUANT_MAP(*cuda_ctx).find(node->src[1]);
+    if (it == GFX906_PREQUANT_MAP(*cuda_ctx).end()) {
         return false;
     }
 
@@ -225,9 +226,9 @@ static inline bool try_prequantized_mul_mat(ggml_backend_cuda_context* cuda_ctx,
 
 // Clear fusion state at start of graph compute
 static inline void clear_fusion_state(ggml_backend_cuda_context* cuda_ctx) {
-    cuda_ctx->fusion_prequant_map.clear();
-    cuda_ctx->fusion_handled_mul_nodes.clear();
-    cuda_ctx->fusion_q8_buffers.clear();
+    GFX906_PREQUANT_MAP(*cuda_ctx).clear();
+    GFX906_HANDLED_MUL_NODES(*cuda_ctx).clear();
+    GFX906_Q8_BUFFERS(*cuda_ctx).clear();
 }
 
 #endif // GGML_USE_HIP && GFX906_KVQ_MOE_CACHE_ENABLED

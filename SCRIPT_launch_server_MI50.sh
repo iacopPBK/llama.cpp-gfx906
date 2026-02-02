@@ -26,7 +26,10 @@ export HCC_AMDGPU_TARGET=gfx906
 
 # Model path 
 MODEL_PATH="/path/..."
-
+MODEL_PATH="/media/iacoppbk/80F42C9BF42C96061/llms/Qwen3-VL-30B-A3B-Thinking-Q4_1.gguf"
+#MODEL_PATH="/media/iacoppbk/80F42C9BF42C96061/llms/openai_gpt-oss-20b-MXFP4.gguf"
+#MODEL_PATH="/home/iacoppbk/Downloads/GLM-4.7-Flash-Q4_1.gguf"
+#MODEL_PATH="/media/iacoppbk/80F42C9BF42C96061/llms/Qwen3-4B-Instruct-2507-Q4_0.gguf"
 
 # Vision projector path (uncomment for multimodal models)
 #MMPROJ_PATH="/path/..."
@@ -45,6 +48,10 @@ MODEL_PATH="/path/..."
 
 ./build/bin/llama-server \
     -m "$MODEL_PATH" \
+        --spec-type ngram-mod \
+        --spec-ngram-size-n 24 \
+        --draft-min 48 \
+        --draft-max 64 \
     -ngl 99 \
     -fa on \
     -ctk q8_0 \

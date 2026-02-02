@@ -3,9 +3,7 @@
 #include "quantize.cuh"
 #include "mmid.cuh"
 
-#if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
-#include "gfx906/fused/gather-q8.cuh"
-#endif
+#include "gfx906/mmq-cache-helpers.cuh"
 
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
     switch (args.type_x) {
@@ -127,36 +125,17 @@ void ggml_cuda_mul_mat_q(
         const size_t nbytes_src1_q8_1 = ne13*ne12 * ne11*ne10_padded * sizeof(block_q8_1)/QK8_1 +
             get_mmq_x_max_host(cc)*sizeof(block_q8_1_mmq);
 
-        const int layout = static_cast<int>(mmq_get_q8_1_ds_layout(src0->type));
-
         const char* src1_q8_1_ptr = nullptr;
         ggml_cuda_pool_alloc<char> src1_q8_1_pool;
+        size_t q8_nbytes = 0;
 
-#if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
-        if (!use_native_mxfp4) {
-            const q8_cache_entry* cached = ctx.q8_cache.lookup(
-                src1, layout, ne10_padded, ne11, ne12, ne13);
+        // Try GFX906 Q8 cache first (returns false if not available or on non-HIP)
+        const bool cache_hit = !use_native_mxfp4 && gfx906_mmq_try_q8_cache(
+            ctx, src1_d, src1, src0->type, ne10, ne11, ne12, ne13, ne10_padded,
+            &src1_q8_1_ptr, &q8_nbytes, stream);
 
-            if (cached) {
-                src1_q8_1_ptr = static_cast<const char*>(cached->q8_data);
-            } else {
-                void* q8_data = ctx.q8_cache.get_buffer(nbytes_src1_q8_1);
-
-                const int64_t s11 = src1->nb[1] / ts_src1;
-                const int64_t s12 = src1->nb[2] / ts_src1;
-                const int64_t s13 = src1->nb[3] / ts_src1;
-                quantize_mmq_q8_1_cuda(src1_d, nullptr, static_cast<char*>(q8_data), src0->type,
-                                       ne10, s11, s12, s13, ne10_padded, ne11, ne12, ne13, stream);
-                CUDA_CHECK(cudaGetLastError());
-
-                ctx.q8_cache.store(src1, layout, q8_data, nbytes_src1_q8_1,
-                                   ne10_padded, ne11, ne12, ne13);
-                src1_q8_1_ptr = static_cast<const char*>(q8_data);
-            }
-        } else
-#endif
-        {
-            // Native mxfp4 or caching disabled - use pool allocation
+        if (!cache_hit) {
+            // Native mxfp4 or cache miss - use pool allocation
             src1_q8_1_pool.alloc(ctx.pool(), nbytes_src1_q8_1);
             src1_q8_1_ptr = src1_q8_1_pool.get();
 
@@ -223,53 +202,13 @@ void ggml_cuda_mul_mat_q(
     const int64_t ne12_flat = 1;
     const int64_t ne13_flat = 1;
 
-#if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
-    // MoE caching: quantize full tensor once, gather rows for each expert call
-    if (!use_native_mxfp4) {
-        const int layout = static_cast<int>(mmq_get_q8_1_ds_layout(src0->type));
+    // Try GFX906 MoE cache first (returns false if not available or on non-HIP)
+    const bool moe_cache_used = !use_native_mxfp4 && gfx906_mmq_try_moe_cache(
+        ctx, src1_d, src1, src0->type, ne10, ne11, ne12, ne13, ne10_padded,
+        ne11_flat, ids_src1.get(), src1_q8_1.get(), stream);
 
-        const q8_cache_entry* moe_cached = ctx.q8_cache.lookup(
-            src1, layout, ne10_padded, ne11, ne12, ne13);
-
-        if (!moe_cached) {
-            const size_t full_nbytes = ne13*ne12*ne11*ne10_padded * sizeof(block_q8_1)/QK8_1 +
-                get_mmq_x_max_host(cc)*sizeof(block_q8_1_mmq);
-
-            void* full_q8 = ctx.q8_cache.get_buffer(full_nbytes);
-
-            const int64_t s11 = src1->nb[1] / ts_src1;
-            const int64_t s12 = src1->nb[2] / ts_src1;
-            const int64_t s13 = src1->nb[3] / ts_src1;
-
-            quantize_mmq_q8_1_cuda(src1_d, nullptr, static_cast<char*>(full_q8), src0->type,
-                                   ne10, s11, s12, s13, ne10_padded,
-                                   ne11, ne12, ne13, stream);
-            CUDA_CHECK(cudaGetLastError());
-
-            ctx.q8_cache.store(src1, layout, full_q8, full_nbytes,
-                               ne10_padded, ne11, ne12, ne13);
-
-            moe_cached = ctx.q8_cache.lookup(src1, layout, ne10_padded, ne11, ne12, ne13);
-        }
-
-        // Gather selected rows from cached full Q8_1 tensor
-        const int64_t block_size = sizeof(block_q8_1_mmq);
-        const int64_t n_blocks = ne10_padded / (4*QK8_1);
-
-        gather_q8_1_rows_cuda(
-            moe_cached->q8_data,
-            ids_src1.get(),
-            src1_q8_1.get(),
-            block_size,
-            n_blocks,
-            ne11,
-            ne11_flat,
-            stream
-        );
-        CUDA_CHECK(cudaGetLastError());
-    } else
-#endif
-    {
+    if (!moe_cache_used) {
+        // No caching - original behavior: quantize only selected rows
         // No caching - original behavior: quantize only selected rows
         const int64_t s11 = src1->nb[1] / ts_src1;
         const int64_t s12 = src1->nb[2] / ts_src1;
