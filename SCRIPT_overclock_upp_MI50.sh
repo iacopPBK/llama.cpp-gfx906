@@ -22,7 +22,7 @@ EOF
 MI50_POWER=235    #Power limit:do not go over 300W
 MI50_SCLK=2020    #Core clock speed
 MI50_MCLK=1100    #Memory clock speed
-MI50_TDC_GFX=240  #TDC limit for GFX (default 330)
+MI50_TDC_GFX=300  #TDC limit for GFX (default 330)
 MI50_CARD=1       #For multi gpu config, choose your MI50!
 
 DEVICE="/sys/class/drm/card${MI50_CARD}/device"

@@ -15,7 +15,6 @@ using namespace ggml_cuda_mma;
     #include "gfx906/gfx906-config.h"
     #include "gfx906/matmul/mmq-prefetch.cuh"
 #endif
-#include "gfx906/mmq-dispatch.cuh"
 
 #define MMQ_DP4A_MAX_BATCH_SIZE 64 // Max. batch size to use for dp4a MMQ kernels when FP16 tensor cores are available.
 
@@ -408,8 +407,16 @@ static __device__ __forceinline__ void vec_dot_q4_0_q8_1_dp4a(
 
                 int u[2*VDR_Q4_0_Q8_1_MMQ];
 
-                // Use GFX906 vectorized loads on AMD, scalar loads on NVIDIA
-                GFX906_MMQ_LOAD_Q4_0(y_qs, j*MMQ_TILE_Y_K_LDS + kyqs, QI4_0, u);
+#if defined(GGML_USE_HIP)
+                // Call GFX906-optimized vectorized load from gfx906/gfx906-mmq.cuh
+                gfx906_load_q4_0_quants_vectorized(y_qs, j*MMQ_TILE_Y_K_LDS + kyqs, QI4_0, u);
+#else
+#pragma unroll
+                for (int l = 0; l < VDR_Q4_0_Q8_1_MMQ; ++l) {
+                    u[2*l+0] = y_qs[j*MMQ_TILE_Y_K_LDS + kyqs +  l];
+                    u[2*l+1] = y_qs[j*MMQ_TILE_Y_K_LDS + kyqs + (l + QI4_0)];
+                }
+#endif
 
                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q4_0_q8_1_impl<VDR_Q4_0_Q8_1_MMQ>
                     (&x_qs[i*(MMQ_TILE_NE_K + 1) + k0/QR4_0], u,
@@ -508,8 +515,16 @@ static __device__ __forceinline__ void vec_dot_q4_1_q8_1_dp4a(
 
                 int u[2*VDR_Q4_1_Q8_1_MMQ];
 
-                // Use GFX906 vectorized loads on AMD, scalar loads on NVIDIA
-                GFX906_MMQ_LOAD_Q4_1(y_qs, j*MMQ_TILE_Y_K_LDS + kyqs, QI4_1, u);
+#if defined(GGML_USE_HIP)
+                // Call GFX906-optimized vectorized load from gfx906/gfx906-mmq.cuh
+                gfx906_load_q4_1_quants_vectorized(y_qs, j*MMQ_TILE_Y_K_LDS + kyqs, QI4_1, u);
+#else
+#pragma unroll
+                for (int l = 0; l < VDR_Q4_1_Q8_1_MMQ; ++l) {
+                    u[2*l+0] = y_qs[j*MMQ_TILE_Y_K_LDS + kyqs +  l];
+                    u[2*l+1] = y_qs[j*MMQ_TILE_Y_K_LDS + kyqs + (l + QI4_1)];
+                }
+#endif
 
                 sum[j0/nwarps*mmq_y/warp_size + i0/warp_size] += vec_dot_q4_1_q8_1_impl<VDR_Q4_1_Q8_1_MMQ>
                     (&x_qs[i*(MMQ_TILE_NE_K + 1) + k0/QR4_1], u,
@@ -703,14 +718,14 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     int i_slot_cache[cache_size];
 
     // Load all data into registers (async)
-    MMQ_LOAD_TILES_Q8_0_OPTIMIZED(cache_size, nrows, nwarps, threads_per_row, need_check,
+    GFX906_LOAD_TILES_Q8_0_ASYNC(cache_size, nrows, nwarps, threads_per_row, need_check,
         x, kbx0, stride, i_max, txi, kbx, kqsx, qs0_cache, qs1_cache, i_slot_cache);
 
     // Store all to LDS
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-    MMQ_STORE_TILES_Q8_0_MMA(cache_size, x_qs, qs0_cache, qs1_cache, i_slot_cache, txi);
+    GFX906_STORE_TILES_Q8_0_LDS_MMA(cache_size, x_qs, qs0_cache, qs1_cache, i_slot_cache, txi);
 #else
-    MMQ_STORE_TILES_Q8_0_LEGACY(cache_size, x_qs, qs0_cache, qs1_cache, i_slot_cache, txi);
+    GFX906_STORE_TILES_Q8_0_LDS_LEGACY(cache_size, x_qs, qs0_cache, qs1_cache, i_slot_cache, txi);
 #endif
 #else
 #pragma unroll
@@ -784,15 +799,32 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     int i_cache[loop_iters > 16 ? 16 : loop_iters];
 
     // Phase 1: Issue all loads
-    MMQ_LOAD_MXFP4_PIPELINED_BEGIN(loop_iters, nrows, nwarps, threads_per_row, need_check,
-        x, kbx0, stride, i_max, kbx, kqsx, aux_q4_cache, i_cache);
+    #pragma unroll
+    for (int iter = 0; iter < (loop_iters > 16 ? 16 : loop_iters); iter++) {
+        const int i0 = iter * nrows * nwarps;
+        int i = i0 + (nrows == 1 ? threadIdx.y : threadIdx.y*nrows + threadIdx.x/threads_per_row);
+        if (need_check) {
+            i = min(i, i_max);
+        }
+        const block_mxfp4 * bxi = (const block_mxfp4 *) x + kbx0 + i*stride + kbx;
+        aux_q4_cache[iter] = get_int_b1(bxi->qs, kqsx);
+        i_cache[iter] = i;
+    }
 
     // Phase 2: Dequant and store
+    const int k0 = kbx * (2 * QI_MXFP4) + kqsx;
+    #pragma unroll
+    for (int iter = 0; iter < (loop_iters > 16 ? 16 : loop_iters); iter++) {
+        const int2 v = get_int_from_mxfp4_table(aux_q4_cache[iter]);
+        const int i = i_cache[iter];
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-    MMQ_LOAD_MXFP4_PIPELINED_END_MMA(loop_iters, x_qs, aux_q4_cache, i_cache, kbx, kqsx);
+        x_qs[i*MMQ_MMA_TILE_X_K_Q8_1 + k0 + 0]        = v.x;
+        x_qs[i*MMQ_MMA_TILE_X_K_Q8_1 + k0 + QI_MXFP4] = v.y;
 #else
-    MMQ_LOAD_MXFP4_PIPELINED_END_DP4A(loop_iters, x_qs, aux_q4_cache, i_cache, kbx, kqsx);
+        x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + 0]        = v.x;
+        x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + QI_MXFP4] = v.y;
 #endif
+    }
 #else
 #pragma unroll
     for (int i0 = 0; i0 < mmq_y; i0 += nrows*nwarps) {

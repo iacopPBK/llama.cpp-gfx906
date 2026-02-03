@@ -1,10 +1,6 @@
 #include "common.cuh"
 #include "mmid.cuh"
 
-#if defined(GGML_USE_HIP)
-#include "gfx906/mmid-helpers.cuh"
-#endif
-
 // To reduce shared memory use, store "it" and "iex_used" with 22/10 bits each.
 struct mm_ids_helper_store {
     uint32_t data;
@@ -144,7 +140,12 @@ void ggml_cuda_launch_mm_ids_helper(
         const int n_experts, const int n_tokens, const int n_expert_used, const int nchannels_y, const int si1, const int sis1, cudaStream_t stream) {
 
 #if defined(GGML_USE_HIP)
-    if (gfx906_mmid_needs_generic_fallback(n_expert_used)) {
+    // On AMD wavefront64 GPUs (like MI50/gfx906), the optimized paths use sub-warp shuffles
+    // that don't work correctly when n_expert_used >= warp_size/2 (the sub-warp width).
+    // Fall back to generic path only for these cases.
+    const int id = ggml_cuda_get_device();
+    const int warp_size = ggml_cuda_info().devices[id].warp_size;
+    if (n_expert_used >= warp_size / 2) {
         launch_mm_ids_helper<0>(ids, ids_src1, ids_dst, expert_bounds, n_experts, n_tokens, n_expert_used, nchannels_y, si1, sis1, stream);
         return;
     }

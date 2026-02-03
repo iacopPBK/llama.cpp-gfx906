@@ -3,7 +3,9 @@
 #include "ggml.h"
 #include "rope.cuh"
 
-#include "gfx906/rope-dispatch.cuh"
+#ifdef GGML_USE_HIP
+#include "gfx906/attention/rope.cuh"
+#endif
 
 struct rope_corr_dims {
     float v[2];
@@ -368,15 +370,16 @@ static void rope_multi_cuda(
         const rope_corr_dims corr_dims, const float * freq_factors, const mrope_sections sections, const bool is_imrope, cudaStream_t stream) {
     GGML_ASSERT(ne0 % 2 == 0);
 
-    // Try GFX906 optimized kernel first (returns false if not available or on non-HIP)
-    if (gfx906_rope_try_dispatch<forward>(
-            x, dst, ne0, ne1, ne2, s1, s2, n_dims, nr,
-            pos, freq_scale, freq_base, ext_factor, attn_factor,
-            corr_dims.v, freq_factors, sections.v, is_imrope, stream)) {
-        return;
-    }
+#if defined(GGML_USE_HIP) && defined(GFX906_ROPE_ENABLED)
+    // GFX906-optimized kernel using __sincosf and precomputed theta_power
+    const gfx906_rope_corr_dims & gfx906_corr = reinterpret_cast<const gfx906_rope_corr_dims &>(corr_dims);
+    const gfx906_mrope_sections & gfx906_sects = reinterpret_cast<const gfx906_mrope_sections &>(sections);
 
-    // Fall back to generic implementation
+    gfx906_rope_multi_cuda<forward, T>(
+        x, dst, ne0, ne1, ne2, s1, s2, n_dims, nr,
+        pos, freq_scale, freq_base, ext_factor, attn_factor,
+        gfx906_corr, freq_factors, gfx906_sects, is_imrope, stream);
+#else
     const dim3 block_dims(1, CUDA_ROPE_BLOCK_SIZE, 1);
     const int n_blocks_x = (ne0 + 2*CUDA_ROPE_BLOCK_SIZE - 1) / (2*CUDA_ROPE_BLOCK_SIZE);
     const dim3 block_nums(nr, n_blocks_x, 1);
@@ -392,6 +395,7 @@ static void rope_multi_cuda(
             x, dst, ne0, ne1, ne2, s1, s2, n_dims, pos, freq_scale, ext_factor,
             attn_factor, corr_dims, theta_scale, freq_factors, sections, is_imrope);
     }
+#endif
 }
 
 template<bool forward, typename T>

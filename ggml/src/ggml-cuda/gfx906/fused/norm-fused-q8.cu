@@ -75,11 +75,7 @@ static __global__ void rms_norm_f32_to_q8_1(
     }
     __syncthreads();
 
-#if defined(GGML_USE_HIP) && defined(__gfx906__)
-    sum_sq = gfx906_warp_reduce_sum_f32(sum_sq);
-#else
     sum_sq = warp_reduce_sum(sum_sq);
-#endif
 
     const int warp_id = tid / WARP_SIZE;
     const int lane_id = tid % WARP_SIZE;
@@ -90,11 +86,7 @@ static __global__ void rms_norm_f32_to_q8_1(
 
     if (warp_id == 0) {
         sum_sq = (lane_id < nwarps) ? s_reduce[lane_id] : 0.0f;
-#if defined(GGML_USE_HIP) && defined(__gfx906__)
-        sum_sq = gfx906_warp_reduce_sum_f32(sum_sq);
-#else
         sum_sq = warp_reduce_sum(sum_sq);
-#endif
     }
 
     float rms_scale;
@@ -139,16 +131,7 @@ static __global__ void rms_norm_f32_to_q8_1(
         float amax = fmaxf(fmaxf(fabsf(v.x), fabsf(v.y)), fmaxf(fabsf(v.z), fabsf(v.w)));
         float sum = v.x + v.y + v.z + v.w;
 
-#if defined(GGML_USE_HIP) && defined(__gfx906__)
-        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, 4, 8));
-        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, 2, 8));
-        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, 1, 8));
-        if constexpr (ds_layout != MMQ_Q8_1_DS_LAYOUT_D4) {
-            sum += __shfl_xor_sync(0xFFFFFFFF, sum, 4, 8);
-            sum += __shfl_xor_sync(0xFFFFFFFF, sum, 2, 8);
-            sum += __shfl_xor_sync(0xFFFFFFFF, sum, 1, 8);
-        }
-#else
+        // 8-thread group reduction using explicit shuffle
         #pragma unroll
         for (int offset = 4; offset > 0; offset >>= 1) {
             amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset, 8));
@@ -156,7 +139,6 @@ static __global__ void rms_norm_f32_to_q8_1(
                 sum += __shfl_xor_sync(0xFFFFFFFF, sum, offset, 8);
             }
         }
-#endif
 
         constexpr float inv_127 = 1.0f / 127.0f;
         const float d = amax * inv_127;

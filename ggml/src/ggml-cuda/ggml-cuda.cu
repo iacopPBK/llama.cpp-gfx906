@@ -3,13 +3,6 @@
 #include "ggml-backend-impl.h"
 
 #include "ggml-cuda/common.cuh"
-
-#if defined(GGML_USE_HIP)
-#include "ggml-cuda/gfx906/ggml-cuda-helpers.cuh"
-#if defined(GFX906_KVQ_MOE_CACHE_ENABLED)
-#include "ggml-cuda/gfx906/gfx906-context.cuh"
-#endif
-#endif
 #include "ggml-cuda/acc.cuh"
 #include "ggml-cuda/add-id.cuh"
 #include "ggml-cuda/arange.cuh"
@@ -67,10 +60,14 @@
 #include "ggml-cuda/tri.cuh"
 
 #ifdef GGML_USE_HIP
-#include "ggml-cuda/gfx906/matmul/gemm-helpers.cuh"
+#include "ggml-cuda/gfx906/matmul/mmf.cuh"
 #endif
 #include "ggml-cuda/cumsum.cuh"
 #include "ggml-cuda/fill.cuh"
+
+#if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
+#include "ggml-cuda/gfx906/fused/graph-fusion.cuh"
+#endif
 
 #include "ggml.h"
 
@@ -561,7 +558,7 @@ ggml_backend_cuda_context::~ggml_backend_cuda_context() {
     ggml_cuda_lock_cv.wait(lock, []{ return ggml_cuda_lock_counter.load(std::memory_order_relaxed) == 0; });
 
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
-    gfx906_context_cleanup(this);
+    q8_cache.free_all();
 #endif
 
     if (copy_event != nullptr) {
@@ -1324,25 +1321,30 @@ static void ggml_cuda_op_mul_mat_cublas(
         CUBLAS_CHECK(cublasSetStream(ctx.cublas_handle(id), stream));
 
         if (GGML_CUDA_CC_IS_CDNA(cc) || GGML_CUDA_CC_IS_RDNA4(cc) || GGML_CUDA_CC_IS_GCN(cc)) {
-#if defined(GGML_USE_HIP)
-            // Try GFX906 custom FP16 GEMM first
-            if (!gfx906_fp16_gemm_dispatch(
+#ifdef GGML_USE_HIP
+            // GFX906 custom FP16 GEMM for medium batch sizes (9-2048)
+            bool handled = false;
+            if (GGML_CUDA_CC_IS_GCN(cc)) {
+                handled = gfx906_mmf_dispatch(
                     src0_ptr, src1_ptr, dst_dd_i,
                     (int)row_diff, (int)src1_ncols, (int)ne10,
-                    (int)ne00, (int)ldc,
-                    stream, cc))
+                    (int)ne00, (int)ne10, (int)ldc,
+                    stream
+                );
+            }
+            if (!handled)
 #endif
             {
-                const float alpha = 1.0f;
-                const float beta = 0.0f;
-                CUBLAS_CHECK(
-                    cublasGemmEx(ctx.cublas_handle(id), CUBLAS_OP_T, CUBLAS_OP_N,
-                            row_diff, src1_ncols, ne10,
-                            &alpha, src0_ptr,  CUDA_R_16F, ne00,
-                                    src1_ptr,  CUDA_R_16F, ne10,
-                            &beta,   dst_dd_i, CUDA_R_32F, ldc,
-                            CUBLAS_COMPUTE_32F,
-                            CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+            const float alpha = 1.0f;
+            const float beta = 0.0f;
+            CUBLAS_CHECK(
+                cublasGemmEx(ctx.cublas_handle(id), CUBLAS_OP_T, CUBLAS_OP_N,
+                        row_diff, src1_ncols, ne10,
+                        &alpha, src0_ptr,  CUDA_R_16F, ne00,
+                                src1_ptr,  CUDA_R_16F, ne10,
+                        &beta,   dst_dd_i, CUDA_R_32F, ldc,
+                        CUBLAS_COMPUTE_32F,
+                        CUBLAS_GEMM_DEFAULT_TENSOR_OP));
             }
         } else {
             ggml_cuda_pool_alloc<half> dst_f16(ctx.pool(id), row_diff*src1_ncols);
@@ -1382,13 +1384,18 @@ static void ggml_cuda_op_mul_mat_cublas(
         const float * src0_ddf_i = src0->type == GGML_TYPE_F32 ? (const float *) src0_dd_i : src0_ddq_as_f32.get();
         const float * src1_ddf1_i = src1->type == GGML_TYPE_F32 ? (const float *) src1_ddf_i : src1_ddq_as_f32.get();
 
-#if defined(GGML_USE_HIP)
-        // Try GFX906 custom SGEMM first
-        if (!gfx906_sgemm_dispatch_wrapper(
+#ifdef GGML_USE_HIP
+        // GFX906 custom SGEMM for medium batch sizes
+        bool handled = false;
+        if (GGML_CUDA_CC_IS_GCN(cc)) {
+            handled = gfx906_sgemm_dispatch(
                 src0_ddf_i, src1_ddf1_i, dst_dd_i,
                 (int)row_diff, (int)src1_ncols, (int)ne10,
-                (int)ne00, (int)ldc,
-                stream, cc))
+                (int)ne00, (int)ne10, (int)ldc,
+                stream
+            );
+        }
+        if (!handled)
 #endif
         {
             const float alpha = 1.0f;
@@ -3429,7 +3436,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
     const bool integrated            = ggml_cuda_info().devices[cuda_ctx->device].integrated;
 
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
-    GFX906_CLEAR_Q8_CACHE(*cuda_ctx);
+    cuda_ctx->clear_q8_cache();
 #endif
 
     ggml_cuda_stream_context & stream_ctx = cuda_ctx->stream_context();
@@ -3461,7 +3468,11 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
         // With the use of CUDA graphs, the execution will be performed by the graph launch.
         if (!use_cuda_graph || cuda_graph_update_required) {
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
-            gfx906_graph_eval_setup(cuda_ctx, use_cuda_graph);
+            // Sync before clearing fusion buffers (skip during graph capture)
+            if (!cuda_ctx->fusion_q8_buffers.empty() && !use_cuda_graph) {
+                CUDA_CHECK(cudaStreamSynchronize(cuda_ctx->stream()));
+            }
+            clear_fusion_state(cuda_ctx);
 #endif
             [[maybe_unused]] int prev_i = 0;
 
@@ -3581,7 +3592,7 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                     ggml_cuda_topk_moe_args args;
 
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
-                    if (gfx906_try_rms_mul_mmq_fusion(cuda_ctx, cgraph, i, use_cuda_graph, cuda_graph_update_required)) {
+                    if (try_rms_mul_mmq_fusion(cuda_ctx, cgraph, i, use_cuda_graph, cuda_graph_update_required)) {
                         continue;
                     }
 #endif
@@ -3905,10 +3916,10 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 }
 
 #if defined(GGML_USE_HIP) && GFX906_KVQ_MOE_CACHE_ENABLED
-                if (gfx906_is_mul_handled_by_fusion(cuda_ctx, node)) {
+                if (is_mul_handled_by_fusion(cuda_ctx, node)) {
                     continue;
                 }
-                if (gfx906_try_prequantized_mul_mat(cuda_ctx, node)) {
+                if (try_prequantized_mul_mat(cuda_ctx, node)) {
                     continue;
                 }
 #endif

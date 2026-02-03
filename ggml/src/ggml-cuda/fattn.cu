@@ -9,7 +9,6 @@
 // GFX906 Q8 Flash Attention kernel
 #ifdef GGML_USE_HIP
     #include "gfx906/attention/fattn-q8.cuh"
-    #include "gfx906/attention/fattn-helpers.cuh"
 #endif
 
 template <int DKQ, int DV, int ncols2>
@@ -467,10 +466,17 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 #endif
     }
 
-#if defined(GGML_USE_HIP)
-    // Use Q8 Flash Attention on AMD when K/V are Q8_0 quantized
-    if (gfx906_fattn_can_use_q8(K, V)) {
-        return BEST_FATTN_KERNEL_TILE_Q8;
+#ifdef GGML_USE_HIP
+    if (K->type == GGML_TYPE_Q8_0 || V->type == GGML_TYPE_Q8_0) {
+        const bool q8_head_size_supported = (K->ne[0] % 32 == 0) &&
+                                            (K->ne[0] != 40) &&
+                                            (K->ne[0] != 80) &&
+                                            (K->ne[0] != 112) &&
+                                            (K->ne[0] != 576);
+
+        if (q8_head_size_supported) {
+            return BEST_FATTN_KERNEL_TILE_Q8;
+        }
     }
 #endif
 

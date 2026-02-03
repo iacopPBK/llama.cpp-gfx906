@@ -1,7 +1,12 @@
 #include "quantize.cuh"
 #include <cstdint>
 
-#include "gfx906/quantize-helpers.cuh"
+// GFX906 optimizations: DPP-based warp reductions
+#ifdef GGML_USE_HIP
+#include "gfx906/gfx906-common.cuh"
+#endif
+// #include <vector>
+// #include <cstdio>
 
 __launch_bounds__(CUDA_QUANTIZE_BLOCK_SIZE, 1)
 static __global__ void quantize_q8_1(
@@ -229,22 +234,108 @@ static __global__ void quantize_mmq_q8_1(
         sum = xi.x + xi.y + xi.z + xi.w;
     }
 
-    // Ultra-fused DPP warp reductions (75% fewer NOPs than separate calls)
+    // =========================================================================
+    // ULTRA-FUSED WARP REDUCTIONS - Single asm block, minimal NOPs
+    // Old approach: separate function calls = 12+ NOPs total
+    // New approach: fused asm block = 3 NOPs total (75% reduction!)
+    // =========================================================================
     if constexpr (vals_per_scale == 32 && vals_per_sum == 32) {
-        GFX906_Q8_1_WARP_REDUCE_DS4(amax, sum);
+        // DS4 layout: Fully fused reduction for both max and sum
+        int amax_i = __float_as_int(amax);
+        int sum_i  = __float_as_int(sum);
+        int amax_tmp, sum_tmp;
+
+        asm volatile(
+            // === XOR4: row_shl:4 + row_shr:4 with bank masks ===
+            "v_mov_b32 %0, %4\n"                                              // amax_tmp = amax
+            "v_mov_b32 %1, %5\n"                                              // sum_tmp = sum
+            "s_nop 1\n"
+            "v_mov_b32_dpp %0, %4 row_shl:4 row_mask:0xf bank_mask:0x5\n"     // amax_tmp for banks 0,2
+            "v_mov_b32_dpp %1, %5 row_shl:4 row_mask:0xf bank_mask:0x5\n"     // sum_tmp for banks 0,2
+            "v_mov_b32_dpp %0, %4 row_shr:4 row_mask:0xf bank_mask:0xa\n"     // amax_tmp for banks 1,3
+            "v_mov_b32_dpp %1, %5 row_shr:4 row_mask:0xf bank_mask:0xa\n"     // sum_tmp for banks 1,3
+            // Combine xor4 results
+            "v_max_f32 %2, %4, %0\n"                                          // amax = max(amax, amax_tmp)
+            "v_add_f32 %3, %5, %1\n"                                          // sum = sum + sum_tmp
+
+            // === XOR2: quad_perm:[2,3,0,1] - fused max/add ===
+            "s_nop 1\n"
+            "v_max_f32_dpp %2, %2, %2 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf\n"
+            "v_add_f32_dpp %3, %3, %3 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf\n"
+
+            // === XOR1: quad_perm:[1,0,3,2] - fused max/add ===
+            // Using s_nop 1 instead of 4 - the operations above provide enough distance
+            "s_nop 1\n"
+            "v_max_f32_dpp %2, %2, %2 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf\n"
+            "v_add_f32_dpp %3, %3, %3 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf\n"
+
+            : "=&v"(amax_tmp), "=&v"(sum_tmp), "=v"(amax_i), "=v"(sum_i)
+            : "v"(amax_i), "v"(sum_i)
+            : "memory"
+        );
+
+        amax = __int_as_float(amax_i);
+        sum  = __int_as_float(sum_i);
+
     } else if constexpr (vals_per_scale == 32) {
-        GFX906_Q8_1_WARP_REDUCE_D4(amax);
+        // D4 layout: Only max reduction needed (no sum)
+        int amax_i = __float_as_int(amax);
+        int amax_tmp;
+
+        asm volatile(
+            // === XOR4 ===
+            "v_mov_b32 %0, %2\n"
+            "s_nop 1\n"
+            "v_mov_b32_dpp %0, %2 row_shl:4 row_mask:0xf bank_mask:0x5\n"
+            "v_mov_b32_dpp %0, %2 row_shr:4 row_mask:0xf bank_mask:0xa\n"
+            "v_max_f32 %1, %2, %0\n"
+
+            // === XOR2 ===
+            "s_nop 1\n"
+            "v_max_f32_dpp %1, %1, %1 quad_perm:[2,3,0,1] row_mask:0xf bank_mask:0xf\n"
+
+            // === XOR1 ===
+            "s_nop 1\n"
+            "v_max_f32_dpp %1, %1, %1 quad_perm:[1,0,3,2] row_mask:0xf bank_mask:0xf\n"
+
+            : "=&v"(amax_tmp), "=v"(amax_i)
+            : "v"(amax_i)
+            : "memory"
+        );
+
+        amax = __int_as_float(amax_i);
+
     } else {
-        GFX906_Q8_1_WARP_REDUCE_GENERIC(amax, sum, vals_per_scale, vals_per_sum, ds_layout);
+        // D2S6 layout: Different reduction widths, use generic path
+        #pragma unroll
+        for (int offset = vals_per_scale/8; offset > 0; offset >>= 1) {
+            amax = fmaxf(amax, __shfl_xor(amax, offset, WARP_SIZE));
+        }
+        if constexpr (ds_layout != MMQ_Q8_1_DS_LAYOUT_D4) {
+            #pragma unroll
+            for (int offset = vals_per_sum/8; offset > 0; offset >>= 1) {
+                sum += __shfl_xor(sum, offset, WARP_SIZE);
+            }
+        }
     }
 
-    // Optimized scale computation (eliminates double reciprocal)
-    float d, d_inv;
-    GFX906_Q8_1_COMPUTE_SCALE(amax, d, d_inv);
+    // =========================================================================
+    // OPTIMIZED SCALE COMPUTATION - Eliminate double reciprocal!
+    // Old: d_inv = 127 * rcp(amax), then d = rcp(d_inv) = rcp(127*rcp(amax))
+    // New: d = amax * (1/127), d_inv = rcp(d) - saves one reciprocal!
+    // =========================================================================
+    constexpr float inv_127 = 1.0f / 127.0f;  // Compile-time constant
+    const float d = amax * inv_127;           // Just a multiply
+    const float d_inv = fast_rcp_f32(d);      // Single reciprocal
 
-    // Quantize with direct float2int conversion
+    // =========================================================================
+    // QUANTIZATION - Use __float2int_rn for direct conversion
+    // =========================================================================
     char4 q;
-    GFX906_Q8_1_QUANTIZE4(q, xi, d_inv);
+    q.x = static_cast<int8_t>(__float2int_rn(xi.x * d_inv));
+    q.y = static_cast<int8_t>(__float2int_rn(xi.y * d_inv));
+    q.z = static_cast<int8_t>(__float2int_rn(xi.z * d_inv));
+    q.w = static_cast<int8_t>(__float2int_rn(xi.w * d_inv));
 
     // Write quantized values (32-bit coalesced write)
     char4 * yqs4 = (char4 *) y[ib].qs;
@@ -349,6 +440,47 @@ void quantize_mmq_q8_1_cuda(
         const int64_t ne0, const int64_t ne1, const int64_t ne2, const int64_t ne3, cudaStream_t stream) {
     GGML_ASSERT(ne00 % 4 == 0);
     GGML_ASSERT(ne0 % (4*QK8_1) == 0);
+
+    // NOTE: Tested 2x (2 values/thread) and 8x (8 values/thread) kernels.
+    // Results: 4x=25ms, 8x=31ms, 2x=41ms. 4-value kernel is optimal due to:
+    // - Balanced register pressure vs reduction count
+    // - Vectorized 128-bit loads and 32-bit writes
+
+    // --- HOST-SIDE DEBUG VALIDATION (commented out) ---
+    // fprintf(stderr, "[quantize_mmq_q8_1] ne00=%ld s01=%ld s02=%ld s03=%ld ne0=%ld ne1=%ld ne2=%ld ne3=%ld ids=%p x=%p\n",
+    //         (long)ne00, (long)s01, (long)s02, (long)s03, (long)ne0, (long)ne1, (long)ne2, (long)ne3, (void*)ids, (void*)x);
+    //
+    // // Calculate maximum index that will be accessed
+    // int64_t max_i1_val = ne1 - 1;
+    // int64_t max_src_idx = (ne3-1)*s03 + (ne2-1)*s02 + max_i1_val*s01 + (ne0-4);
+    // fprintf(stderr, "[quantize_mmq_q8_1] Grid: (%ld, %ld, %ld) max_src_idx=%ld (assuming no ids remapping)\n",
+    //         (long)ne1, (long)((ne0 + 4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) / (4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ)),
+    //         (long)(ne2*ne3), (long)max_src_idx);
+    //
+    // if (ids) {
+    //     // For MoE: copy ids to host and validate
+    //     std::vector<int32_t> ids_host(ne1);
+    //     CUDA_CHECK(cudaMemcpyAsync(ids_host.data(), ids, ne1 * sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+    //     CUDA_CHECK(cudaStreamSynchronize(stream));
+    //
+    //     int64_t max_ids_val = 0;
+    //     int64_t min_ids_val = INT64_MAX;
+    //     for (int64_t i = 0; i < ne1; i++) {
+    //         if (ids_host[i] > max_ids_val) max_ids_val = ids_host[i];
+    //         if (ids_host[i] < min_ids_val) min_ids_val = ids_host[i];
+    //     }
+    //     fprintf(stderr, "[quantize_mmq_q8_1] ids range: [%ld, %ld] (ne1=%ld)\n",
+    //             (long)min_ids_val, (long)max_ids_val, (long)ne1);
+    //
+    //     max_src_idx = (ne3-1)*s03 + (ne2-1)*s02 + max_ids_val*s01 + (ne0-4);
+    //     fprintf(stderr, "[quantize_mmq_q8_1] max_src_idx with ids remapping=%ld\n", (long)max_src_idx);
+    //
+    //     if (max_ids_val * s01 > 1000000000LL) {
+    //         fprintf(stderr, "[quantize_mmq_q8_1] WARNING: max_ids_val * s01 = %ld seems too large!\n",
+    //                 (long)(max_ids_val * s01));
+    //     }
+    // }
+    // --- END DEBUG VALIDATION ---
 
     // ne1 tends to assume the highest values, therefore use it as the "x" dimension of the CUDA grid:
     const int64_t block_num_y = (ne0 + 4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) / (4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ);

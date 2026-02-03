@@ -23,7 +23,7 @@ export HIP_VISIBLE_DEVICES=0
 MODEL_PATH="/media/iacoppbk/80F42C9BF42C96061/llms/Qwen3-VL-30B-A3B-Thinking-Q4_1.gguf"
 #MODEL_PATH="/media/iacoppbk/80F42C9BF42C96061/llms/openai_gpt-oss-20b-MXFP4.gguf"
 #MODEL_PATH="/home/iacoppbk/Downloads/GLM-4.7-Flash-Q4_1.gguf"
-#MODEL_PATH="/media/iacoppbk/80F42C9BF42C96061/llms/Qwen3-4B-Instruct-2507-Q4_0.gguf"
+#MODEL_PATH="/media/iacoppbk/80F42C9BF42C96061/llms/Qwen3-4B-Instruct-2507-Q4_1.gguf"
 LOG_FILE="bench_results.md"
 
 #MODEL_PATH="/media/iacoppbk/80F42C9BF42C96061/llms/Qwen3-4B-Instruct-2507-Q8_0.gguf"
