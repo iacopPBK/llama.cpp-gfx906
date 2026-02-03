@@ -84,8 +84,8 @@ static __global__ void gfx906_mul_mat_vec_q4_1_warp_coop(
         sumf += sumi * dm4.x * ds8.x + dm4.y * ds8.y;
     }
 
-    // Half-warp reduction using fully fused DPP instructions
-    sumf = gfx906_warp_reduce_sum_32_f32(sumf);
+    // Half-warp reduction using fused DPP instructions
+    sumf = warp_reduce_sum<32>(sumf);
 
     // First thread of each half-warp writes result
     if (half_lane == 0) {

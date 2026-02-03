@@ -53,7 +53,7 @@ BENCH_PARAMS=(
 # - Depth: 0 (default context)
 #BENCH_TESTS="-p 512 -n 128"
 #BENCH_TESTS="-p 512 -n 128"
-BENCH_TESTS="-p 128,512,2048,8192 -n 64,128,512,2048"
+BENCH_TESTS="-p 512,2048,8192 -n 1,128,2048"
 
 echo "=== Benchmark ==="
 echo "Model: $(basename "$MODEL_PATH")"
