@@ -2937,6 +2937,17 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
 #endif
         }
 
+#ifdef GGML_USE_HIP
+        // GFX906/GCN: Disable CUDA graphs for SOLVE_TRI (batched TRSM crashes on ROCm)
+        // Qwen3-Next and other hybrid models use SOLVE_TRI for recurrent layers
+        if (node->op == GGML_OP_SOLVE_TRI) {
+            use_cuda_graph = false;
+#ifndef NDEBUG
+            GGML_LOG_DEBUG("%s: disabling CUDA graphs due to SOLVE_TRI on ROCm\n", __func__);
+#endif
+        }
+#endif
+
         if (node->op == GGML_OP_ADD &&
             node->src[1] && node->src[1]->ne[1] > 1 &&
             (node->src[0] ? node->src[0]->name != gemma3n_per_layer_proj_src0_name : true) &&
@@ -4927,6 +4938,20 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_TRI:
         case GGML_OP_DIAG:
         case GGML_OP_SOLVE_TRI:
+#if defined(GGML_USE_HIP)
+            // GFX906: limit SOLVE_TRI dimensions to avoid rocBLAS batched TRSM crashes
+            // Qwen3-Next and other hybrid models use SOLVE_TRI for recurrent layers
+            {
+                const int cc = ggml_cuda_info().devices[dev_ctx->device].cc;
+                if (GGML_CUDA_CC_IS_GCN(cc)) {
+                    // Check for NULL sources before accessing dimensions
+                    if (op->src[0] && op->src[1]) {
+                        return op->src[0]->ne[0] <= 64 && op->src[1]->ne[0] <= 32;
+                    }
+                    return false; // Fall back to CPU if sources not available
+                }
+            }
+#endif
             return true;
 
         default:

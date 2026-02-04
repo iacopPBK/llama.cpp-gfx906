@@ -50,19 +50,19 @@ MODEL_PATH="/path/..."
 
 ./build/bin/llama-server \
     -m "$MODEL_PATH" \
-        --spec-type ngram-mod \
-        --spec-ngram-size-n 24 \
-        --draft-min 48 \
-        --draft-max 64 \
+        #--spec-type ngram-mod \
+        #--spec-ngram-size-n 24 \
+        #--draft-min 48 \
+        #--draft-max 64 \
     -ngl 99 \
     -fa on \
-    -ctk q8_0 \
+    -ctk f16 \
     -ctv f16 \
     --host 0.0.0.0 \
     --port 8080 \
-    -c 80000 \
+    -c 800 \
     -b 2048 \
-    -ub 1800 \
+    -ub 2048 \
     --jinja
     # --mmproj "$MMPROJ_PATH"
     

@@ -19,8 +19,8 @@ EOF
 
 export HSA_OVERRIDE_GFX_VERSION=9.0.6
 export HIP_VISIBLE_DEVICES=0
-#MODEL_PATH="/media/iacoppbk/80F42C9BF42C96061/llms/Qwen3-VL-30B-A3B-Thinking-Q4_1.gguf"
-MODEL_PATH="/media/iacoppbk/80F42C9BF42C96061/llms/Qwen3-Next-80B-A3B-Instruct-Q2_K.gguf"
+
+MODEL_PATH="/path/..."
 LOG_FILE="bench_results.md"
 
 
@@ -36,13 +36,15 @@ BENCH_PARAMS=(
     -r 1                   # Number of repetitions
     -b 2048                # Batch size
     -ub 2048               # Micro-batch size
-    #-d 8192               # Context size 
+    #-d 8192               # Context size
+    #-v                     # Verbose output (show llama.cpp internal logs)
 )
 
 
 #BENCH_TESTS="-p 0 -n 2048"
 #BENCH_TESTS="-p 2048 -n 0"
 BENCH_TESTS="-p 512,2048,8192 -n 1,128,2048"
+#BENCH_TESTS="-p 512 -n 128"
 
 echo "=== Benchmark ==="
 echo "Model: $(basename "$MODEL_PATH")"
