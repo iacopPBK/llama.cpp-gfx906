@@ -1,4 +1,4 @@
-### UPDATE: correctness seems better now
+### UPDATE: this fork is not updated. It will be updated asap and all the best changes will be pred to the upstream!
 
 # llama.cpp-gfx906-2602
 
