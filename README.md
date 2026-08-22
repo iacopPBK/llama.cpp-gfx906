@@ -1,4 +1,4 @@
-### UPDATE: this fork is not updated. 
+### This fork is not updated. 
 ### Check -> https://github.com/mxxm-t/mx-llama.cpp
 
 
